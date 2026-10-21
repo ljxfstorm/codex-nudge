@@ -114,6 +114,25 @@ class WatchTests(unittest.TestCase):
             self.run_once()
         self.assertEqual(self.sent, 1)
 
+    def test_unexpected_response_persists_safe_metadata_and_blocks_restart(self):
+        self.run_once()
+        self.now = 102
+        error = inference.InferenceError("PRIVATE_RESPONSE_MESSAGE", http_status=200,
+                                         content_type="application/json; private=PRIVATE_PARAMETER")
+        with patch.object(inference, "post_once", side_effect=error) as post, \
+                self.assertRaises(inference.InferenceError):
+            self.run_once()
+        post.assert_called_once()
+        saved = self.saved()
+        self.assertEqual(saved["attempt"]["phase"], "blocked")
+        self.assertEqual(saved["attempt"]["failure"], {"kind": "inference_response", "http_status": 200,
+                                                       "content_type": "application/json"})
+        self.assertNotIn("usage", saved["attempt"])
+        self.assertNotIn("PRIVATE_", json.dumps(saved))
+        with patch.object(inference, "post_once") as post, self.assertRaises(ScheduleError):
+            self.run_once()
+        post.assert_not_called()
+
     def test_intent_write_failure_prevents_inference(self):
         self.run_once()
         self.now = 102

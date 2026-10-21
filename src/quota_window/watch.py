@@ -4,7 +4,7 @@ import math
 import time
 
 from .auth import AuthError, AuthSession
-from .inference import MODEL, RECIPE
+from .inference import MODEL, RECIPE, InferenceError
 from .schedule import Schedule, ScheduleError
 from .storage import StateStore
 
@@ -55,7 +55,15 @@ def run(directory, *, send=False, once=False, interval=300, emit=None):
                     store.write("schedule.json", engine.data)
                     return prepared
 
-                usage = session.wake_once(reserve)
+                try:
+                    usage = session.wake_once(reserve)
+                except InferenceError as error:
+                    attempt = engine.data["attempt"]
+                    if attempt and attempt["phase"] == "sending":
+                        attempt.update(phase="blocked", failure={"kind": "inference_response",
+                                       "http_status": error.http_status, "content_type": error.content_type})
+                        store.write("schedule.json", engine.data)
+                    raise
                 if usage is not None:
                     engine.completed(usage, time.time())
                     store.write("schedule.json", engine.data)

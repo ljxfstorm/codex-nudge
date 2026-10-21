@@ -110,3 +110,46 @@ class InferenceTests(unittest.TestCase):
         with patch.object(inference, "build_opener") as build, self.assertRaises(inference.InferenceError):
             inference.post_once("bad\nheader", "synthetic-account")
         build.assert_not_called()
+
+    def test_unexpected_response_retains_safe_metadata_without_consuming_body(self):
+        for status, content_type in ((200, "application/json"), (202, "text/event-stream"),
+                                     (200, "text/html"), (200, None)):
+            response = stream(terminal())
+            response.status = status
+            del response.headers["Content-Type"]
+            if content_type is not None:
+                response.headers["Content-Type"] = content_type
+            response.read1 = lambda *_: self.fail("Unexpected body must not be consumed or logged")
+            with self.subTest(status=status, content_type=content_type), \
+                    patch.object(inference, "build_opener") as build:
+                build.return_value.open.return_value = response
+                with self.assertRaises(inference.InferenceError) as caught:
+                    inference.post_once("SYNTHETIC_ACCESS", "synthetic-account")
+                self.assertEqual(getattr(caught.exception, "http_status", None), status)
+                self.assertEqual(getattr(caught.exception, "content_type", None), content_type)
+                self.assertIn(str(status), str(caught.exception))
+                self.assertNotIn("PRIVATE_REPLY", str(caught.exception))
+                build.return_value.open.assert_called_once()
+
+    def test_response_metadata_redacts_header_parameters_and_unknown_types(self):
+        for raw, expected in (("application/json; secret=PRIVATE_SECRET", "application/json"),
+                              ("application/PRIVATE_SECRET", "other"), ("PRIVATE_SECRET\r\n", "other")):
+            response = stream(terminal())
+            response.headers.replace_header("Content-Type", raw)
+            with patch.object(inference, "build_opener") as build:
+                build.return_value.open.return_value = response
+                with self.assertRaises(inference.InferenceError) as caught:
+                    inference.post_once("SYNTHETIC_ACCESS", "synthetic-account")
+                self.assertEqual(caught.exception.content_type, expected)
+                self.assertNotIn("PRIVATE_SECRET", str(caught.exception))
+
+    def test_stream_parse_failure_preserves_http_metadata_without_body_disclosure(self):
+        response = stream(terminal(model="PRIVATE_MODEL"))
+        with patch.object(inference, "build_opener") as build:
+            build.return_value.open.return_value = response
+            with self.assertRaises(inference.InferenceError) as caught:
+                inference.post_once("SYNTHETIC_ACCESS", "synthetic-account")
+            self.assertEqual(caught.exception.http_status, 200)
+            self.assertEqual(caught.exception.content_type, "text/event-stream")
+            self.assertNotIn("PRIVATE_MODEL", str(caught.exception))
+            self.assertNotIn("PRIVATE_REPLY", str(caught.exception))

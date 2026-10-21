@@ -20,6 +20,22 @@ MAX_EVENT_BYTES = 65536
 class InferenceError(Exception):
     """Safe to display; usage may have occurred even when collection fails."""
 
+    def __init__(self, message, *, http_status=None, content_type=None):
+        self.http_status = http_status if type(http_status) is int and 100 <= http_status <= 599 else None
+        self.content_type = safe_content_type(content_type)
+        if http_status is not None or content_type is not None:
+            message += f" (HTTP {self.http_status or 'unknown'}, Content-Type {self.content_type or 'missing'})"
+        super().__init__(message)
+
+
+def safe_content_type(value):
+    if value is None:
+        return None
+    media = value.split(";", 1)[0].strip().lower() if isinstance(value, str) else ""
+    # Do not echo arbitrary header contents, parameters or identifiers.
+    return media if media in {"text/event-stream", "application/json", "text/plain", "text/html",
+                              "application/octet-stream"} else "other"
+
 
 def payload():
     # Preserve the independently measured 18-token recipe, including its
@@ -127,9 +143,14 @@ def post_once(access_token, account_id):
         "session-id": str(uuid.uuid4()), "x-openai-internal-codex-responses-lite": "true"})
     try:
         with build_opener(NoRedirect()).open(request, timeout=15) as response:
-            if response.status != 200 or response.headers.get_content_type() != "text/event-stream":
-                raise InferenceError("Inference returned an unexpected status or content type; no retry permitted.")
-            return collect(response)
+            content_type = response.headers.get("Content-Type")
+            if response.status != 200 or safe_content_type(content_type) != "text/event-stream":
+                raise InferenceError("Inference response was unexpected; usage is unknown and no retry is permitted.",
+                                     http_status=response.status, content_type=content_type)
+            try:
+                return collect(response)
+            except InferenceError as error:
+                raise InferenceError(str(error), http_status=response.status, content_type=content_type) from None
     except HTTPError as error:
         raise _http_error(error) from None
     except (URLError, OSError, HTTPException):
