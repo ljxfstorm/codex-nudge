@@ -26,7 +26,15 @@ AGENTS.md 作为入口，引用本文件；规则只维护一份。实现出现�
 
 ## 验证
 
-当前基础模块测试从仓库根目录运行：`PYTHONPATH=src python3 -m unittest discover -s tests -v`。测试只使用临时目录、合成数据和本地子进程，不访问账户或网络。项目名及打包元数据确定后再补安装与构建命令。
+从仓库根目录准备开发环境并运行测试：
+
+```sh
+uv venv --python python3 .venv
+uv pip install --python .venv/bin/python -r requirements.txt
+PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
+```
+
+当前实现要求 Python 3.10 或更新版本，已在 Python 3.13 验证。测试只使用临时目录、合成数据和本地子进程，不访问账户或网络；身份测试使用真实 RSA 签名，不跳过加密依赖。项目名及打包元数据确定后再补安装与构建命令。
 
 修复缺陷先复现，再验证修复。调度、认证、持久状态及恢复逻辑需要自动化回归测试。常规测试使用假凭据和假传输，离线执行；真实请求实验独立记录版本、usage 及窗口证据。
 
