@@ -38,4 +38,4 @@ AGENTS.md 作为入口，引用本文件；规则只维护一份。实现出现�
 
 ## 发布
 
-采用 SemVer，tag、包版本与 Release 对应同一源码提交；0.x 的破坏性变化也写迁移说明。首发提供 wheel、sdist、校验和及变更说明，使用固定 tag 安装；后续再评估 PyPI。
+采用 SemVer，tag、包版本与 Release 对应同一源码提交；0.x 的破坏性变化也写迁移说明。技术栈确定后再选择发行产物；Release 附校验和及变更说明，安装使用固定版本。Python 方案提供 wheel/sdist，Go 方案提供按目标架构构建的二进制。
