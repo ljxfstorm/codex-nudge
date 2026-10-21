@@ -113,7 +113,7 @@ class InferenceTests(unittest.TestCase):
 
     def test_unexpected_response_retains_safe_metadata_without_consuming_body(self):
         for status, content_type in ((200, "application/json"), (202, "text/event-stream"),
-                                     (200, "text/html"), (200, None)):
+                                     (200, "text/html")):
             response = stream(terminal())
             response.status = status
             del response.headers["Content-Type"]
@@ -130,6 +130,40 @@ class InferenceTests(unittest.TestCase):
                 self.assertIn(str(status), str(caught.exception))
                 self.assertNotIn("PRIVATE_REPLY", str(caught.exception))
                 build.return_value.open.assert_called_once()
+
+    def test_missing_content_type_accepts_only_a_valid_completed_sse(self):
+        response = stream(terminal())
+        del response.headers["Content-Type"]
+        with patch.object(inference, "build_opener") as build:
+            build.return_value.open.return_value = response
+            usage = inference.post_once("SYNTHETIC_ACCESS", "synthetic-account")
+        self.assertEqual(usage["total_tokens"], 18)
+        build.return_value.open.assert_called_once()
+
+    def test_missing_content_type_never_accepts_json_html_partial_or_invalid_usage(self):
+        for body in (b'<html>completed</html>', json.dumps(terminal()["response"]).encode(),
+                     b'data: [DONE]\n\n', b'data: {"type":"response.output_text.delta","delta":"OK"}\n\n',
+                     b'data: ' + json.dumps(terminal(usage=None)).encode() + b'\n\n',
+                     b'data: ' + json.dumps(terminal(model="different")).encode() + b'\n\n'):
+            response = io.BytesIO(body)
+            response.status, response.headers = 200, Message()
+            with self.subTest(body=body[:40]), patch.object(inference, "build_opener") as build:
+                build.return_value.open.return_value = response
+                with self.assertRaises(inference.InferenceError) as caught:
+                    inference.post_once("SYNTHETIC_ACCESS", "synthetic-account")
+                self.assertEqual(caught.exception.http_status, 200)
+                self.assertIsNone(caught.exception.content_type)
+                build.return_value.open.assert_called_once()
+
+    def test_missing_content_type_does_not_relax_success_status(self):
+        response = stream(terminal())
+        response.status = 202
+        del response.headers["Content-Type"]
+        with patch.object(inference, "build_opener") as build:
+            build.return_value.open.return_value = response
+            with self.assertRaises(inference.InferenceError) as caught:
+                inference.post_once("SYNTHETIC_ACCESS", "synthetic-account")
+        self.assertEqual(caught.exception.http_status, 202)
 
     def test_response_metadata_redacts_header_parameters_and_unknown_types(self):
         for raw, expected in (("application/json; secret=PRIVATE_SECRET", "application/json"),

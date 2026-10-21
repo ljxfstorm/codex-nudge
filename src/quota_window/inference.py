@@ -144,7 +144,10 @@ def post_once(access_token, account_id):
     try:
         with build_opener(NoRedirect()).open(request, timeout=15) as response:
             content_type = response.headers.get("Content-Type")
-            if response.status != 200 or safe_content_type(content_type) != "text/event-stream":
+            # The verified backend Lite route can omit Content-Type. Missing
+            # metadata is tolerated only for HTTP 200; the body must still pass
+            # complete SSE, model, output-item and usage validation below.
+            if response.status != 200 or (content_type is not None and safe_content_type(content_type) != "text/event-stream"):
                 raise InferenceError("Inference response was unexpected; usage is unknown and no retry is permitted.",
                                      http_status=response.status, content_type=content_type)
             try:
