@@ -36,6 +36,14 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 
 当前实现要求 Python 3.10 或更新版本，已在 Python 3.13 验证。测试只使用临时目录、合成数据和本地子进程，不访问账户或网络；身份测试使用真实 RSA 签名，不跳过加密依赖。项目名及打包元数据确定后再补安装与构建命令。
 
+两项 systemd 原生验收默认跳过，需要 Linux 用户管理器和访问它的权限时单独运行：
+
+```sh
+QUOTA_WINDOW_SYSTEMD_TESTS=1 PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -p test_service.py -v
+```
+
+验收先由 `systemd-analyze` 解析服务文件，再临时链接并启动唯一命名的一次性测试单元，核对实际 argv 和 PYTHONPATH，最后停止、删除运行时链接。该单元只运行合成 Python 模块，不调用账户或推理，也不修改现有服务文件；不要把它误认为生产服务启动测试。
+
 修复缺陷先复现，再验证修复。调度、认证、持久状态及恢复逻辑需要自动化回归测试。常规测试使用假凭据和假传输，离线执行；真实请求实验独立记录版本、usage 及窗口证据。
 
 实现时补充实际测试与构建命令，再配置所需 CI。发布验收包括干净环境安装、从仓库外运行、发行文件清单和 systemd 原生解析及实际传参。没有程序之前不建立空转 CI 或为文档添加形式化测试。

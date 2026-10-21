@@ -9,10 +9,12 @@ import sys
 import warnings
 
 from .auth import AuthError, AuthSession
+from .config import ConfigError, absolute_path, create as create_config, load as load_config
 from .identity import IdentityError
 from .quota import QuotaError
 from .inference import InferenceError
 from .schedule import ScheduleError
+from .service import ServiceError, render as render_service
 from .storage import StorageError
 from .transport import TransportError
 from .watch import run as run_watch
@@ -27,8 +29,13 @@ def _quota(snapshot):
 
 def _parser():
     parser = argparse.ArgumentParser(description="Observe one Codex quota account independently.")
-    parser.add_argument("--state-dir", required=True, help="private directory owned by this tool")
+    parser.add_argument("--config", help="private JSON configuration file")
+    parser.add_argument("--state-dir", help="private state directory; overrides configuration")
     commands = parser.add_subparsers(dest="command", required=True)
+    setup = commands.add_parser("setup", help="create configuration without overwriting; no login or service activation")
+    setup.add_argument("--client-id", help="optional compatibility OAuth client ID")
+    setup.add_argument("--enable-send", action="store_true", help="explicitly enable automatic requests in this configuration")
+    setup.add_argument("--interval", type=float, default=300, help="normal polling seconds (2..3600)")
     login = commands.add_parser("login", help="independent browser login or explicit credential recovery")
     login.add_argument("--client-id", help="explicit compatibility OAuth client ID; required for a new login")
     actions = login.add_mutually_exclusive_group()
@@ -40,26 +47,54 @@ def _parser():
     status.add_argument("--offline", action="store_true", help="inspect local state without network access")
     doctor = commands.add_parser("doctor", help="diagnose local readiness; offline by default")
     doctor.add_argument("--online", action="store_true", help="also verify quota with a GET; never refresh")
-    watch = commands.add_parser("watch", help="observe five-hour windows; read-only unless --send is provided")
-    watch.add_argument("--send", action="store_true", help="allow the fixed minimal inference recipe and necessary credential renewal")
+    watch = commands.add_parser("watch", help="observe five-hour windows using configuration or explicit mode")
+    _send_options(watch)
     watch.add_argument("--once", action="store_true", help="take one observation and send at most once; verification may need later runs")
-    watch.add_argument("--interval", type=float, default=300, help="normal polling seconds (2..3600); boundaries use shorter delays")
+    watch.add_argument("--interval", type=float, help="normal polling seconds (2..3600); defaults to configuration or 300")
+    service = commands.add_parser("service", help="print a systemd user unit; does not install or start it")
+    _send_options(service)
     return parser
+
+
+def _send_options(parser):
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--send", action="store_true", default=None, help="allow minimal inference and necessary renewal")
+    group.add_argument("--no-send", dest="send", action="store_false", help="force read-only observation, overriding configuration")
 
 
 def main(argv=None):
     parser = _parser()
     args = parser.parse_args(argv)
-    if args.command == "login":
-        recovery = args.resume or args.verify or args.refresh
-        if recovery and args.client_id:
-            parser.error("--client-id applies only to a new login")
-        if not recovery and not args.client_id:
-            parser.error("a new login requires --client-id")
-    session = AuthSession(args.state_dir)
     try:
+        if args.command == "setup":
+            if not args.config or not args.state_dir:
+                parser.error("setup requires --config and --state-dir")
+            settings = create_config(args.config, state_dir=args.state_dir, client_id=args.client_id,
+                                     send=args.enable_send, interval=args.interval)
+            print(json.dumps({"config_saved": True, "watch_send": settings.send}))
+            return 0
+        settings = load_config(args.config) if args.config else None
+        if args.command == "service":
+            if not args.config or args.state_dir:
+                parser.error("service requires --config and does not accept --state-dir overrides")
+            print(render_service(args.config, send=args.send), end="")
+            return 0
+        state_dir = absolute_path(args.state_dir) if args.state_dir else settings.state_dir if settings else None
+        if state_dir is None:
+            parser.error("provide --state-dir or a configuration with --config")
+        if args.command == "login":
+            recovery = args.resume or args.verify or args.refresh
+            if recovery and args.client_id:
+                parser.error("--client-id applies only to a new login")
+            if not recovery:
+                args.client_id = args.client_id or (settings.client_id if settings else None)
+                if not args.client_id:
+                    parser.error("a new login requires --client-id in arguments or configuration")
+        session = AuthSession(state_dir)
         if args.command == "watch":
-            run_watch(args.state_dir, send=args.send, once=args.once, interval=args.interval,
+            send = args.send if args.send is not None else settings.send if settings else False
+            interval = args.interval if args.interval is not None else settings.interval if settings else 300
+            run_watch(state_dir, send=send, once=args.once, interval=interval,
                       emit=lambda event: print(json.dumps(event, allow_nan=False), flush=True))
             return 0
         if args.command == "login":
@@ -92,7 +127,7 @@ def main(argv=None):
             if args.command == "doctor":
                 dependencies = {name: find_spec(name) is not None for name in ("jwt", "cryptography")}
                 result.update(dependencies=dependencies, codex_required=False,
-                              default_mode="read_only", automatic_requests="requires_watch_send",
+                              configured_watch_send=settings.send if settings else False,
                               ready_for_query=local["state"] == "ready" and not local.get("expired", True))
             if online and local["state"] != "not_logged_in":
                 result["quota"] = _quota(session.query_quota())
@@ -102,9 +137,13 @@ def main(argv=None):
         if args.command == "doctor":
             return 0 if result["ready_for_query"] and all(result["dependencies"].values()) else 1
         return 0
-    except (AuthError, IdentityError, QuotaError, StorageError, TransportError, InferenceError, ScheduleError) as error:
+    except TransportError as error:
         print(str(error), file=sys.stderr)
-        return 1
+        temporary = error.status is None or error.status == 429 or error.status >= 500
+        return 2 if args.command == "watch" and not temporary else 1
+    except (AuthError, IdentityError, QuotaError, StorageError, InferenceError, ScheduleError, ConfigError, ServiceError) as error:
+        print(str(error), file=sys.stderr)
+        return 2 if args.command == "watch" else 1
     except EOFError:
         print("Callback entry ended; no exchange was sent. Resume the waiting login in a terminal.", file=sys.stderr)
         return 1

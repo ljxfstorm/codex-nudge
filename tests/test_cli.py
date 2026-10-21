@@ -12,7 +12,9 @@ from unittest.mock import patch
 
 from quota_window.auth import AuthSession, LoginChallenge
 from quota_window.cli import main
+from quota_window.config import create, load
 from quota_window.quota import Snapshot, Window
+from quota_window.schedule import ScheduleError
 from quota_window.transport import TransportError
 
 
@@ -118,6 +120,92 @@ class CliTests(unittest.TestCase):
             self.assertEqual(self.invoke("unused", "watch", "--send", "--interval", "60")[0], 0)
             self.assertTrue(run.call_args.kwargs["send"])
             self.assertEqual(run.call_args.kwargs["interval"], 60)
+
+    def configured(self, config, *args, state_dir=None):
+        out, err = StringIO(), StringIO()
+        argv = ["--config", str(config)]
+        if state_dir is not None:
+            argv += ["--state-dir", str(state_dir)]
+        with redirect_stdout(out), redirect_stderr(err):
+            code = main([*argv, *args])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_setup_is_offline_private_and_never_overwrites(self):
+        with tempfile.TemporaryDirectory() as root, patch("quota_window.cli.AuthSession") as auth:
+            config, state = Path(root) / "config.json", Path(root) / "state"
+            code, out, err = self.configured(config, "setup", state_dir=state)
+            self.assertEqual((code, err), (0, ""))
+            self.assertFalse(json.loads(out)["watch_send"])
+            self.assertFalse(load(config).send)
+            self.assertFalse(state.exists())
+            self.assertEqual(self.configured(config, "setup", "--enable-send", state_dir=state)[0], 1)
+            self.assertFalse(load(config).send)
+            auth.assert_not_called()
+
+    def test_configuration_precedence_and_readonly_override(self):
+        with tempfile.TemporaryDirectory() as root, patch("quota_window.cli.run_watch") as run:
+            config, state, override = Path(root) / "config.json", Path(root) / "state", Path(root) / "other"
+            create(config, state_dir=state, send=True, interval=60)
+            self.assertEqual(self.configured(config, "watch", "--once")[0], 0)
+            self.assertEqual(run.call_args.args, (state,))
+            self.assertTrue(run.call_args.kwargs["send"])
+            self.assertEqual(run.call_args.kwargs["interval"], 60)
+            self.assertEqual(self.configured(config, "watch", "--no-send", "--interval", "45", state_dir=override)[0], 0)
+            self.assertEqual(run.call_args.args, (override,))
+            self.assertFalse(run.call_args.kwargs["send"])
+            self.assertEqual(run.call_args.kwargs["interval"], 45)
+            self.assertTrue(load(config).send)
+
+    def test_configured_client_id_is_used_only_for_a_new_login(self):
+        with tempfile.TemporaryDirectory() as root, \
+                patch.object(AuthSession, "prepare_login", return_value=LoginChallenge("url", 1)) as prepare, \
+                patch.object(AuthSession, "complete_login", return_value=Snapshot(True, True, ())), \
+                patch.object(AuthSession, "refresh", return_value=Snapshot(True, True, ())), \
+                patch("quota_window.cli.sys.stdin.isatty", return_value=True), \
+                patch("quota_window.cli.getpass.getpass", return_value="private-callback"):
+            config = Path(root) / "config.json"
+            create(config, state_dir=Path(root) / "state", client_id="configured-client")
+            self.assertEqual(self.configured(config, "login")[0], 0)
+            prepare.assert_called_once_with("configured-client", reauthorize=False)
+            self.assertEqual(self.configured(config, "login", "--refresh")[0], 0)
+            self.assertEqual(prepare.call_count, 1)
+
+    def test_enabled_configuration_does_not_make_status_or_doctor_send(self):
+        with tempfile.TemporaryDirectory() as root, \
+                patch.object(AuthSession, "local_status", return_value={"state": "ready", "expired": False}), \
+                patch.object(AuthSession, "query_quota", return_value=Snapshot(True, True, ())) as query, \
+                patch.object(AuthSession, "refresh") as refresh, \
+                patch.object(AuthSession, "wake_once") as wake:
+            config = Path(root) / "config.json"
+            create(config, state_dir=Path(root) / "state", send=True)
+            self.assertEqual(self.configured(config, "status")[0], 0)
+            self.assertEqual(self.configured(config, "doctor", "--online")[0], 0)
+            self.assertEqual(query.call_count, 2)
+            refresh.assert_not_called()
+            wake.assert_not_called()
+
+    def test_service_only_renders_without_opening_credentials(self):
+        with tempfile.TemporaryDirectory() as root, patch("quota_window.cli.AuthSession") as auth:
+            config = Path(root) / "config.json"
+            create(config, state_dir=Path(root) / "state")
+            code, out, err = self.configured(config, "service", "--no-send")
+            self.assertEqual((code, err), (0, ""))
+            self.assertIn("[Service]", out)
+            self.assertIn('"--no-send"', out)
+            auth.assert_not_called()
+
+    def test_fatal_watch_errors_stop_service_and_temporary_reads_allow_restart(self):
+        for error, expected in ((ScheduleError("uncertain attempt"), 2),
+                                (TransportError("unauthorized", status=401), 2),
+                                (TransportError("unsupported", status=400), 2),
+                                (TransportError("disconnected"), 1),
+                                (TransportError("busy", status=429), 1),
+                                (TransportError("route", status=530), 1)):
+            with self.subTest(error=error), patch("quota_window.cli.run_watch", side_effect=error):
+                code, out, err = self.invoke("unused", "watch", "--once")
+                self.assertEqual(code, expected)
+                self.assertEqual(out, "")
+                self.assertNotIn("Traceback", err)
 
     def test_module_entry_point_runs_from_outside_repository(self):
         with tempfile.TemporaryDirectory() as root:
