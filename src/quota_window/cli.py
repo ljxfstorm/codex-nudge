@@ -11,8 +11,11 @@ import warnings
 from .auth import AuthError, AuthSession
 from .identity import IdentityError
 from .quota import QuotaError
+from .inference import InferenceError
+from .schedule import ScheduleError
 from .storage import StorageError
 from .transport import TransportError
+from .watch import run as run_watch
 
 
 def _quota(snapshot):
@@ -37,6 +40,10 @@ def _parser():
     status.add_argument("--offline", action="store_true", help="inspect local state without network access")
     doctor = commands.add_parser("doctor", help="diagnose local readiness; offline by default")
     doctor.add_argument("--online", action="store_true", help="also verify quota with a GET; never refresh")
+    watch = commands.add_parser("watch", help="observe five-hour windows; read-only unless --send is provided")
+    watch.add_argument("--send", action="store_true", help="allow the fixed minimal inference recipe and necessary credential renewal")
+    watch.add_argument("--once", action="store_true", help="take one observation and send at most once; verification may need later runs")
+    watch.add_argument("--interval", type=float, default=300, help="normal polling seconds (2..3600); boundaries use shorter delays")
     return parser
 
 
@@ -51,6 +58,10 @@ def main(argv=None):
             parser.error("a new login requires --client-id")
     session = AuthSession(args.state_dir)
     try:
+        if args.command == "watch":
+            run_watch(args.state_dir, send=args.send, once=args.once, interval=args.interval,
+                      emit=lambda event: print(json.dumps(event, allow_nan=False), flush=True))
+            return 0
         if args.command == "login":
             if args.verify:
                 snapshot = session.verify()
@@ -81,7 +92,7 @@ def main(argv=None):
             if args.command == "doctor":
                 dependencies = {name: find_spec(name) is not None for name in ("jwt", "cryptography")}
                 result.update(dependencies=dependencies, codex_required=False,
-                              automatic_requests_enabled=False,
+                              default_mode="read_only", automatic_requests="requires_watch_send",
                               ready_for_query=local["state"] == "ready" and not local.get("expired", True))
             if online and local["state"] != "not_logged_in":
                 result["quota"] = _quota(session.query_quota())
@@ -91,7 +102,7 @@ def main(argv=None):
         if args.command == "doctor":
             return 0 if result["ready_for_query"] and all(result["dependencies"].values()) else 1
         return 0
-    except (AuthError, IdentityError, QuotaError, StorageError, TransportError) as error:
+    except (AuthError, IdentityError, QuotaError, StorageError, TransportError, InferenceError, ScheduleError) as error:
         print(str(error), file=sys.stderr)
         return 1
     except EOFError:
@@ -101,5 +112,5 @@ def main(argv=None):
         print("Hidden callback input is unavailable; use a terminal with echo control. No exchange was sent.", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("Interrupted. Inspect local status before continuing; an uncertain exchange will not be replayed.", file=sys.stderr)
+        print("Interrupted. Inspect local state before continuing; uncertain requests will not be replayed.", file=sys.stderr)
         return 130

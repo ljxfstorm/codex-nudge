@@ -238,3 +238,28 @@ class AuthSession:
             updated = self._token_record(response, value["client_id"], previous=value)
             store.write("credentials.json", updated)
             return self._verify(store, updated)
+
+    def account_binding(self):
+        with StateStore(self.directory) as store:
+            value = self._credentials(store)
+            identity = [value[key] for key in ("client_id", "subject", "account_id")]
+            return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
+
+    def wake_once(self, reserve):
+        """Lock credentials across a final quota GET, durable reservation and POST.
+
+        reserve(snapshot, query_start, query_finish) checks the scheduler's idle
+        classification and persists intent before returning True. It returns
+        False if another client's activity or permissions cancel this send.
+        """
+        from .inference import post_once
+
+        with StateStore(self.directory) as store:
+            value = self._credentials(store)
+            if value["phase"] != "ready" or value["expires_at"] <= time.time() + 90:
+                raise AuthError("Wake requires ready credentials with at least 90 seconds remaining.")
+            started = time.time()
+            snapshot = self._snapshot(value)
+            if not reserve(snapshot, started, time.time()):
+                return None
+            return post_once(value["access_token"], value["account_id"])

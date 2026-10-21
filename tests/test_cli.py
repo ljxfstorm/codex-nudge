@@ -110,6 +110,15 @@ class CliTests(unittest.TestCase):
             self.assertEqual(out, "")
             self.assertEqual(err, "OpenAI HTTP 530; no retry sent.\n")
 
+    def test_watch_requires_explicit_opt_in_and_forwards_one_shot_semantics(self):
+        with patch("quota_window.cli.run_watch") as run:
+            self.assertEqual(self.invoke("unused", "watch", "--once")[0], 0)
+            self.assertFalse(run.call_args.kwargs["send"])
+            self.assertTrue(run.call_args.kwargs["once"])
+            self.assertEqual(self.invoke("unused", "watch", "--send", "--interval", "60")[0], 0)
+            self.assertTrue(run.call_args.kwargs["send"])
+            self.assertEqual(run.call_args.kwargs["interval"], 60)
+
     def test_module_entry_point_runs_from_outside_repository(self):
         with tempfile.TemporaryDirectory() as root:
             env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
