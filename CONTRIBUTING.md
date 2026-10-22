@@ -19,10 +19,10 @@ AGENTS.md 作为入口，引用本文件；规则只维护一份。实现出现�
 - 每个 commit 完成一个可独立审阅、可回退的变化；相关实现、测试和文档一起提交。
 - 分开提交无关重构、格式修改与功能变化；不把一项行为拆成暂时破坏程序的多个提交。
 - 提交前检查暂存 diff，逐项添加文件，保留他人的未提交工作。
-- 消息使用简短、平实的英文祈使句，说明具体变化。通常以约50字符为目标，可为清楚表达适当放宽；不要求类型前缀、emoji 或固定模板。
-- 标题足够说明变化时仅写标题；必要的正文解释原因、限制或取舍，不重复 diff。
+- 消息遵循 Conventional Commits：`type(scope): description`，scope 可省略。新增行为用 `feat`，缺陷修复用 `fix`，文档用 `docs`，仓库维护用 `chore`；scope 仅在有助于定位时添加。description 使用简短、平实的英文祈使句，说明具体变化；完整标题以约 50 字符为目标，可为清楚表达适当放宽。
+- 标题足够说明变化时仅写标题；必要的正文解释原因、限制或取舍，不重复 diff。破坏性变更用 `!` 标记，并在正文或 `BREAKING CHANGE:` footer 说明影响与迁移。
 
-示例：`Reject unsupported state versions`、`Preserve literal dollars in service arguments`、`Record token usage for wake requests`。避免 `Update code`、`Various improvements` 或宣传性描述。
+示例：`fix(storage): reject unsupported state versions`、`fix(service): preserve literal dollars in arguments`、`feat(watch): record token usage for wake requests`。避免 `Update code`、`Various improvements` 或宣传性描述。
 
 ## 验证
 
