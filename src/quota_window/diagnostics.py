@@ -4,6 +4,7 @@ from importlib.metadata import PackageNotFoundError, version
 import math
 import platform
 from pathlib import Path
+import re
 import time
 
 from . import __version__
@@ -15,6 +16,9 @@ AUTH_PHASES = {"ready", "verification_pending", "refresh_pending"}
 LOGIN_PHASES = {"waiting", "exchange_pending", "complete", "denied"}
 WINDOW_PHASES = {"discovering", "armed", "await_refresh", "ready"}
 ATTEMPT_PHASES = {"sending", "completed", "verified", "blocked"}
+RUNTIME_PHASES = {"starting", "querying", "observing", "renewing", "retrying", "waiting", "requesting", "stopped"}
+ERROR_KINDS = {"http", "network", "protocol", "authentication", "identity", "quota", "schedule",
+               "inference", "storage", "interrupted", "unexpected"}
 
 
 def _number(value):
@@ -38,6 +42,45 @@ def _record(directory, name):
     if type(value.get("schema")) is not int or value["schema"] != 1:
         return "unsupported_or_invalid", None
     return "present", value
+
+
+def _runtime(directory):
+    status, value = _record(directory, "health.json")
+    result = {"record": status}
+    if not value:
+        return result
+    result["phase"] = _phase(value.get("phase"), RUNTIME_PHASES)
+    if type(value.get("automatic_requests_enabled")) is bool:
+        result["automatic_requests_enabled"] = value["automatic_requests_enabled"]
+    version = value.get("version")
+    if isinstance(version, str) and re.fullmatch(r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}(?:[-+][A-Za-z0-9.-]{1,40})?", version):
+        result["version"] = version
+    for key in ("started_at", "updated_at", "last_successful_query_at", "next_action_at", "last_error_at"):
+        if _number(value.get(key)) and value[key] >= 0:
+            result[key] = value[key]
+    action = value.get("next_action")
+    if action is None:
+        result["next_action"] = None
+    else:
+        result["next_action"] = _phase(action, {"quota", "credential_verification", "credential_renewal",
+                                               "wake_request", "observation"})
+    retries = value.get("read_retries")
+    if type(retries) is int and 0 <= retries <= 3:
+        result["read_retries"] = retries
+    if "stop_reason" in value:
+        result["stop_reason"] = _phase(value["stop_reason"], ERROR_KINDS | {"completed"})
+    failure = value.get("last_error")
+    if isinstance(failure, dict):
+        status = failure.get("http_status")
+        result["last_error"] = {"kind": _phase(failure.get("kind"), ERROR_KINDS),
+                                "http_status": status if type(status) is int and 100 <= status <= 599 else None}
+    if "updated_at" in result:
+        now = time.time()
+        result["age_seconds"] = max(0, now - result["updated_at"])
+        # A stale record is an observation, not proof of process liveness.
+        due = max(result["updated_at"], result.get("next_action_at", 0))
+        result["overdue"] = result["phase"] != "stopped" and now > due + 60
+    return result
 
 
 def collect(directory, *, settings=None):
@@ -67,7 +110,7 @@ def collect(directory, *, settings=None):
     if login:
         authentication["login_phase"] = _phase(login.get("phase"), LOGIN_PHASES)
     status, schedule = _record(directory / "watch", "schedule.json")
-    watcher = report["watcher"] = {"record": status}
+    watcher = report["watcher"] = {"record": status, "runtime": _runtime(directory / "watch")}
     if not schedule:
         return report
     window, attempt = schedule.get("window"), schedule.get("attempt")

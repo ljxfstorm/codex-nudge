@@ -14,6 +14,46 @@ from quota_window.storage import StateStore, StorageError, read_snapshot
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_runtime_health_reports_actual_mode_and_overdue_without_network(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root) / 'state'
+            with StateStore(directory / 'watch') as store:
+                store.write('health.json', {'schema': 1, 'version': '0.1.0', 'phase': 'retrying',
+                    'automatic_requests_enabled': True, 'started_at': 90, 'updated_at': 100,
+                    'last_successful_query_at': 95, 'next_action': 'quota', 'next_action_at': 300,
+                    'read_retries': 2, 'last_error': {'kind': 'http', 'http_status': 503}})
+                before = (directory / 'watch' / 'health.json').read_bytes()
+                with patch('quota_window.diagnostics.time.time', return_value=340):
+                    report = collect(directory)
+                runtime = report['watcher']['runtime']
+                self.assertFalse(report['configuration']['watch_send'])
+                self.assertTrue(runtime['automatic_requests_enabled'])
+                self.assertEqual(runtime['next_action_at'], 300)
+                self.assertEqual(runtime['last_error']['http_status'], 503)
+                self.assertFalse(runtime['overdue'])
+                with patch('quota_window.diagnostics.time.time', return_value=361):
+                    self.assertTrue(collect(directory)['watcher']['runtime']['overdue'])
+                self.assertEqual(before, (directory / 'watch' / 'health.json').read_bytes())
+
+    def test_runtime_health_filters_untrusted_fields_and_marks_stopped(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root) / 'state'
+            with StateStore(directory / 'watch') as store:
+                store.write('health.json', {'schema': 1, 'version': 'PRIVATE_VERSION', 'phase': 'stopped',
+                    'automatic_requests_enabled': 'PRIVATE_MODE', 'updated_at': 100,
+                    'last_successful_query_at': 10 ** 400, 'next_action': {'PRIVATE_ACTION': True},
+                    'read_retries': True, 'stop_reason': 'PRIVATE_REASON',
+                    'last_error': {'kind': 'PRIVATE_KIND', 'http_status': 'PRIVATE_STATUS',
+                                   'message': 'PRIVATE_MESSAGE'}, 'token': 'PRIVATE_TOKEN'})
+            report = collect(directory)
+            self.assertNotIn('PRIVATE_', json.dumps(report))
+            runtime = report['watcher']['runtime']
+            self.assertFalse(runtime['overdue'])
+            self.assertEqual(runtime['stop_reason'], 'invalid')
+            self.assertEqual(runtime['last_error'], {'kind': 'invalid', 'http_status': None})
+            for key in ('version', 'automatic_requests_enabled', 'read_retries', 'last_successful_query_at'):
+                self.assertNotIn(key, runtime)
+
     def test_absent_state_is_offline_and_creates_nothing(self):
         with tempfile.TemporaryDirectory() as root, patch('quota_window.auth.request_json') as request:
             directory = Path(root) / 'absent'

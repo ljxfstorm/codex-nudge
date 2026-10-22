@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from quota_window import auth, inference, watch
+from quota_window.diagnostics import collect
 from quota_window.schedule import ScheduleError
 from quota_window.storage import StateStore, StorageError
 from quota_window.transport import TransportError
@@ -70,6 +71,9 @@ class WatchTests(unittest.TestCase):
 
     def saved(self):
         return json.loads((self.directory / "watch/schedule.json").read_text())
+
+    def health(self):
+        return json.loads((self.directory / "watch/health.json").read_text())
 
     def credentials(self):
         with StateStore(self.directory) as store:
@@ -278,6 +282,50 @@ class WatchTests(unittest.TestCase):
             with self.subTest(interval=interval), self.assertRaises(ScheduleError):
                 watch.run(self.directory, interval=interval)
 
+    def test_one_shot_health_records_actual_mode_and_completion(self):
+        self.run_once(send=False)
+        health = self.health()
+        self.assertEqual((health["phase"], health["stop_reason"]), ("stopped", "completed"))
+        self.assertFalse(health["automatic_requests_enabled"])
+        self.assertEqual(health["last_successful_query_at"], 100)
+        self.assertIsNone(health["next_action_at"])
+
+    def test_damaged_health_snapshot_can_be_rebuilt_without_resetting_schedule(self):
+        self.run_once(send=False)
+        (self.directory / "watch/health.json").write_text('{"incomplete":')
+        self.now = 102
+        self.run_once(send=False)
+        self.assertEqual(self.health()["stop_reason"], "completed")
+        self.assertEqual(self.saved()["window"]["phase"], "ready")
+        self.assertEqual(self.sent, 0)
+
+    def test_waiting_health_can_be_read_during_watch_and_interrupt_records_reason(self):
+        def sleep(delay):
+            runtime = collect(self.directory)["watcher"]["runtime"]
+            self.assertEqual(runtime["phase"], "waiting")
+            self.assertTrue(runtime["automatic_requests_enabled"])
+            self.assertEqual(runtime["next_action_at"], self.now + delay)
+            self.assertFalse(runtime["overdue"])
+            raise KeyboardInterrupt()
+
+        with patch.object(watch, "sleep_for", side_effect=sleep), self.assertRaises(KeyboardInterrupt):
+            watch.run(self.directory, send=True)
+        self.assertEqual(self.health()["stop_reason"], "interrupted")
+        self.assertEqual(self.sent, 0)
+
+    def test_health_retains_last_success_across_a_failed_restart_without_error_text(self):
+        self.run_once(send=False)
+        self.now = 200
+        self.query_errors = [TransportError("PRIVATE_NETWORK_DETAIL")]
+        with self.assertRaises(TransportError):
+            self.run_once(send=False)
+        health = self.health()
+        self.assertEqual(health["last_successful_query_at"], 100)
+        self.assertEqual(health["last_error_at"], 200)
+        self.assertEqual(health["stop_reason"], "network")
+        self.assertNotIn("PRIVATE_NETWORK_DETAIL", json.dumps(health))
+        self.assertNotIn("synthetic-account", json.dumps(health))
+
     def test_transient_reads_recover_using_only_the_successful_query_timing(self):
         self.query_errors = [TransportError("PRIVATE_ERROR"), TransportError("busy", status=503)]
 
@@ -302,10 +350,13 @@ class WatchTests(unittest.TestCase):
             with self.subTest(status=status):
                 self.query_errors = [TransportError("unavailable", status=status)] * 4
                 before = self.gets
-                with patch.object(watch, "sleep_for") as sleep, self.assertRaises(TransportError):
+                with patch.object(watch, "sleep_for") as sleep, self.assertRaisesRegex(TransportError, "budget exhausted"):
                     watch.run(self.directory)
                 self.assertEqual(self.gets - before, 4)
                 self.assertEqual([call.args[0] for call in sleep.call_args_list], delays)
+                self.assertEqual(self.health()["phase"], "stopped")
+                self.assertEqual(self.health()["read_retries"], 3)
+                self.assertEqual(self.health()["last_error"]["http_status"], status)
 
     def test_permanent_read_errors_never_retry(self):
         for error in (TransportError("unauthorized", status=401),
@@ -382,3 +433,34 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(self.gets - before, 2)
         self.assertEqual(self.sent, 0)
         self.assertIsNone(self.saved()["attempt"])
+
+    def test_post_verification_get_recovers_without_repeating_successful_inference(self):
+        def post(access, account):
+            result = self.post(access, account)
+            self.query_errors = [TransportError("verification read disconnected")]
+            return result
+
+        def sleep(delay):
+            self.now += delay
+
+        def emit(event):
+            if event["event"] == "fixed_reset_observed":
+                raise KeyboardInterrupt()
+
+        with patch.object(inference, "post_once", side_effect=post), \
+                patch.object(watch, "sleep_for", side_effect=sleep), self.assertRaises(KeyboardInterrupt):
+            watch.run(self.directory, send=True, emit=emit)
+        self.assertEqual((self.sent, self.refreshes), (1, 0))
+        self.assertEqual(self.saved()["attempt"]["phase"], "verified")
+        self.assertEqual(self.saved()["attempt"]["usage"]["total_tokens"], 18)
+
+    def test_continuous_watch_does_not_retry_unknown_inference(self):
+        self.run_once()
+        self.now = 102
+        self.fail_send = True
+        with patch.object(watch, "sleep_for") as sleep, self.assertRaises(TransportError):
+            watch.run(self.directory, send=True)
+        sleep.assert_not_called()
+        self.assertEqual(self.sent, 1)
+        self.assertEqual(self.saved()["attempt"]["phase"], "sending")
+        self.assertEqual(self.health()["stop_reason"], "network")
