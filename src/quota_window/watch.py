@@ -1,6 +1,9 @@
 """Foreground watcher with one lease and durable inference intent."""
 
+from contextlib import contextmanager
 import math
+import signal
+import threading
 import time
 
 from . import __version__
@@ -14,6 +17,32 @@ from .transport import TransportError
 
 
 READ_RETRY_DELAYS = (5, 15, 45)
+
+
+class _Terminated(BaseException):
+    """Unwind a SIGTERM without treating it as a retryable operation failure."""
+
+
+@contextmanager
+def _termination():
+    # Python signal handlers are process-wide and can only be set on the main
+    # thread. Library callers on other threads retain their caller's policy.
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    stopping = False
+
+    def terminate(signum, frame):
+        nonlocal stopping
+        if not stopping:
+            stopping = True
+            raise _Terminated()
+
+    previous = signal.signal(signal.SIGTERM, terminate)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def _failure(error):
@@ -59,9 +88,12 @@ class _Health:
         self.store.write("health.json", self.data)
 
     def stop(self, error=None):
+        reason = _failure(error)["kind"] if error is not None else "completed"
+        if isinstance(error, _Terminated):
+            reason = "terminated"
         fields = {"phase": "stopped", "next_action": None, "next_action_at": None,
-                  "stop_reason": _failure(error)["kind"] if error is not None else "completed"}
-        if error is not None:
+                  "stopped_at": time.time(), "stop_reason": reason}
+        if error is not None and not isinstance(error, _Terminated):
             fields.update(last_error=_failure(error), last_error_at=time.time())
         self.update(**fields)
 
@@ -148,17 +180,20 @@ def run(directory, *, send=False, once=False, interval=300, emit=None):
     # while sleeping. Every watcher for this account uses the same subdirectory.
     with StateStore(session.directory / "watch") as store:
         health = _Health(store, send)
-        try:
-            engine = Schedule(store.read("schedule.json"), binding)
-            emit({"event": "watcher_started", "version": __version__, "automatic_requests_enabled": send})
-            _loop(session, store, engine, health, send=send, once=once, interval=interval, emit=emit)
-        except BaseException as error:
+        with _termination():
             try:
-                health.stop(error)
-            except StorageError:
-                pass  # Keep the original error and durable inference intent.
-            raise
-        health.stop()
+                engine = Schedule(store.read("schedule.json"), binding)
+                emit({"event": "watcher_started", "version": __version__, "automatic_requests_enabled": send})
+                _loop(session, store, engine, health, send=send, once=once, interval=interval, emit=emit)
+            except BaseException as error:
+                try:
+                    health.stop(error)
+                except StorageError:
+                    pass  # Keep the original error and durable inference intent.
+                if isinstance(error, _Terminated):
+                    return
+                raise
+            health.stop()
 
 
 def _loop(session, store, engine, health, *, send, once, interval, emit):

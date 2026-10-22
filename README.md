@@ -79,6 +79,6 @@ uv run --locked codex-nudge --config ~/.config/codex-nudge/settings.json diagnos
 
 报告包含环境、配置开关、认证阶段、窗口和最近一次 usage；不包含凭据、账户标识、路径、attempt ID、原始回复或日志。`watcher.runtime` 提供后台记录的版本、实际发送开关、最后成功查询、下次动作、读重试次数及安全错误分类；其中 `automatic_requests_enabled` 能反映进程的 `--send` 覆盖。配置部分仍只表示配置文件。
 
-runtime 是最后一次本地快照，不证明进程仍活着；超过预定动作时间 60 秒未更新时 `overdue=true`，没有预定时间则从最后更新时间起算。退出原因适用于程序捕获的错误、终端中断及 `--once` 正常完成；SIGTERM、强制结束或主机掉电可能只留下旧快照，服务存活状态以 `systemctl --user status codex-nudge.service` 为准。日志保存在前台标准输出或用户 journal，由主机的 journal 保留策略管理。
+runtime 是最后一次本地快照，不证明进程仍活着；超过预定动作时间 60 秒未更新时 `overdue=true`，没有预定时间则从最后更新时间起算。退出时记录 `stopped_at` 与原因；watch 收到 SIGTERM（如 systemd 停止服务）会尽力写入 `stop_reason=terminated`、释放锁并正常退出，请求或续期的不确定标记仍保留。启动早期、落盘失败、强制结束或主机掉电可能只留下旧快照，服务存活状态以 `systemctl --user status codex-nudge.service` 为准。日志保存在前台标准输出或用户 journal，由主机的 journal 保留策略管理。
 
 开发和发布约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。

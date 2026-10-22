@@ -1,5 +1,11 @@
 import json
+import os
 from pathlib import Path
+import select
+import signal
+import subprocess
+import sys
+import time
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -312,6 +318,119 @@ class WatchTests(unittest.TestCase):
             watch.run(self.directory, send=True)
         self.assertEqual(self.health()["stop_reason"], "interrupted")
         self.assertEqual(self.sent, 0)
+
+    def test_sigterm_stops_waiting_and_releases_the_watcher_lease(self):
+        previous = signal.getsignal(signal.SIGTERM)
+
+        def sleep(delay):
+            signal.raise_signal(signal.SIGTERM)
+
+        with patch.object(watch, "sleep_for", side_effect=sleep):
+            watch.run(self.directory, send=True)
+        self.assertIs(signal.getsignal(signal.SIGTERM), previous)
+        runtime = collect(self.directory)["watcher"]["runtime"]
+        self.assertEqual((runtime["phase"], runtime["stop_reason"]), ("stopped", "terminated"))
+        self.assertEqual(runtime["stopped_at"], self.now)
+        self.assertNotIn("last_error", runtime)
+        self.assertIsNone(runtime["next_action"])
+        self.assertFalse(runtime["overdue"])
+        self.assertEqual((self.sent, self.refreshes), (0, 0))
+        self.run_once(send=False)  # The lifecycle lease was released.
+
+    def test_sigterm_during_inference_preserves_the_unknown_attempt(self):
+        self.run_once()
+        self.now = 102
+
+        def post(access, account):
+            self.assertEqual(self.saved()["attempt"]["phase"], "sending")
+            self.sent += 1
+            signal.raise_signal(signal.SIGTERM)
+
+        with patch.object(inference, "post_once", side_effect=post):
+            self.run_once()
+        self.assertEqual(self.health()["stop_reason"], "terminated")
+        self.assertEqual(self.saved()["attempt"]["phase"], "sending")
+        with self.assertRaises(ScheduleError):
+            self.run_once()
+        self.assertEqual(self.sent, 1)
+
+    def test_repeated_sigterm_does_not_interrupt_the_stop_record(self):
+        original = StateStore.write
+
+        def write(store, name, value):
+            if name == "health.json" and value["phase"] == "stopped":
+                signal.raise_signal(signal.SIGTERM)
+            return original(store, name, value)
+
+        with patch.object(StateStore, "write", new=write), \
+                patch.object(watch, "sleep_for", side_effect=lambda delay: signal.raise_signal(signal.SIGTERM)):
+            watch.run(self.directory)
+        self.assertEqual(self.health()["stop_reason"], "terminated")
+
+    def test_sigterm_during_refresh_preserves_the_unknown_rotation(self):
+        with StateStore(self.directory) as store:
+            value = store.read("credentials.json")
+            value["expires_at"] = 110
+            store.write("credentials.json", value)
+
+        def request(url, **kwargs):
+            self.assertEqual(url, auth.TOKEN_URL)
+            marker = json.loads((self.directory / "credentials.json").read_text())
+            self.assertEqual(marker["phase"], "refresh_pending")
+            signal.raise_signal(signal.SIGTERM)
+
+        with patch.object(auth, "request_json", side_effect=request):
+            self.run_once()
+        self.assertEqual(self.credentials()["phase"], "refresh_pending")
+        self.assertEqual(self.health()["stop_reason"], "terminated")
+        with self.assertRaises(auth.AuthError):
+            self.run_once()
+
+    def test_real_sigterm_exits_the_cli_cleanly_during_sleep_or_backoff(self):
+        for retry in (False, True):
+            with self.subTest(retry=retry):
+                script = '''
+import sys, time
+from quota_window import auth
+from quota_window.cli import main
+from quota_window.transport import TransportError
+def query(*args, **kwargs):
+    if sys.argv[2] == "True":
+        raise TransportError("synthetic busy", status=429, retry_after=600)
+    return {"account_id": "synthetic-account", "rate_limit": {"allowed": True,
+        "primary_window": {"limit_window_seconds": 18000, "used_percent": 1, "reset_at": int(time.time()) + 1000}}}
+auth.request_json = query
+sys.exit(main(["--state-dir", sys.argv[1], "watch", "--no-send"]))
+'''
+                # Use real expiry here; the fixture's frozen clock is process-local.
+                with StateStore(self.directory) as store:
+                    value = store.read("credentials.json")
+                    value["expires_at"] = 4000000000
+                    store.write("credentials.json", value)
+                environment = dict(os.environ, PYTHONPATH=str(Path(watch.__file__).resolve().parents[1]))
+                child = subprocess.Popen([sys.executable, "-u", "-c", script, str(self.directory), str(retry)],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
+                try:
+                    pending, events = b"", []
+                    deadline = time.monotonic() + 10
+                    while ("read_retry" if retry else "active_window") not in events:
+                        remaining = max(0, deadline - time.monotonic())
+                        self.assertTrue(select.select([child.stdout], [], [], remaining)[0], "Watcher did not reach a wait.")
+                        chunk = os.read(child.stdout.fileno(), 4096)
+                        self.assertTrue(chunk, "Watcher exited before waiting.")
+                        pending += chunk
+                        while b"\n" in pending:
+                            line, pending = pending.split(b"\n", 1)
+                            events.append(json.loads(line)["event"])
+                    child.terminate()
+                    out, err = child.communicate(timeout=10)
+                    self.assertEqual(child.returncode, 0, out + err)
+                    self.assertEqual(err, "")
+                    self.assertEqual(self.health()["stop_reason"], "terminated")
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                    child.communicate(timeout=10)
 
     def test_health_retains_last_success_across_a_failed_restart_without_error_text(self):
         self.run_once(send=False)

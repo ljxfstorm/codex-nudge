@@ -55,7 +55,7 @@ def _runtime(directory):
     version = value.get("version")
     if isinstance(version, str) and re.fullmatch(r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}(?:[-+][A-Za-z0-9.-]{1,40})?", version):
         result["version"] = version
-    for key in ("started_at", "updated_at", "last_successful_query_at", "next_action_at", "last_error_at"):
+    for key in ("started_at", "updated_at", "stopped_at", "last_successful_query_at", "next_action_at", "last_error_at"):
         if _number(value.get(key)) and value[key] >= 0:
             result[key] = value[key]
     action = value.get("next_action")
@@ -68,7 +68,7 @@ def _runtime(directory):
     if type(retries) is int and 0 <= retries <= 3:
         result["read_retries"] = retries
     if "stop_reason" in value:
-        result["stop_reason"] = _phase(value["stop_reason"], ERROR_KINDS | {"completed"})
+        result["stop_reason"] = _phase(value["stop_reason"], ERROR_KINDS | {"completed", "terminated"})
     failure = value.get("last_error")
     if isinstance(failure, dict):
         status = failure.get("http_status")
