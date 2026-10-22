@@ -464,3 +464,36 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(self.sent, 1)
         self.assertEqual(self.saved()["attempt"]["phase"], "sending")
         self.assertEqual(self.health()["stop_reason"], "network")
+
+    def test_token_expiry_during_read_backoff_returns_to_explicit_renewal(self):
+        with StateStore(self.directory) as store:
+            value = store.read("credentials.json")
+            value["expires_at"] = 225
+            store.write("credentials.json", value)
+        self.query_errors = [TransportError("rate limited", status=429)]
+
+        def sleep(delay):
+            self.now += delay
+
+        def emit(event):
+            if event["event"] == "confirming_reset":
+                raise KeyboardInterrupt()
+
+        with patch.object(watch, "sleep_for", side_effect=sleep), self.assertRaises(KeyboardInterrupt):
+            watch.run(self.directory, send=True, emit=emit)
+        self.assertEqual((self.now, self.refreshes, self.sent), (400, 1, 0))
+        self.assertEqual(self.credentials()["phase"], "ready")
+
+    def test_readonly_backoff_does_not_renew_an_expired_token(self):
+        with StateStore(self.directory) as store:
+            value = store.read("credentials.json")
+            value["expires_at"] = 225
+            store.write("credentials.json", value)
+        self.query_errors = [TransportError("rate limited", status=429)]
+
+        def sleep(delay):
+            self.now += delay
+
+        with patch.object(watch, "sleep_for", side_effect=sleep), self.assertRaises(auth.AccessTokenExpired):
+            watch.run(self.directory, send=False)
+        self.assertEqual((self.refreshes, self.sent), (0, 0))

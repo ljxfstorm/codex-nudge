@@ -4,7 +4,7 @@ import math
 import time
 
 from . import __version__
-from .auth import AuthError, AuthSession
+from .auth import AccessTokenExpired, AuthError, AuthSession
 from .identity import IdentityError
 from .inference import MODEL, RECIPE, InferenceError
 from .quota import QuotaError
@@ -158,8 +158,15 @@ def run(directory, *, send=False, once=False, interval=300, emit=None):
 def _loop(session, store, engine, health, *, send, once, interval, emit):
     while True:
         _ready(session, send=send, once=once, emit=emit, health=health)
-        snapshot, started, now = _read(session.query_quota, operation="quota",
-                                      once=once, emit=emit, health=health)
+        try:
+            snapshot, started, now = _read(session.query_quota, operation="quota",
+                                          once=once, emit=emit, health=health)
+        except AccessTokenExpired:
+            if not send:
+                raise
+            # Read backoff can outlast the access token. Return to the explicit
+            # renewal path rather than hiding a POST inside the GET retry loop.
+            continue
         try:
             decision = engine.observe(snapshot, started, now)
         except ScheduleError:

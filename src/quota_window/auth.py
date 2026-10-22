@@ -27,6 +27,10 @@ class AuthError(Exception):
     pass
 
 
+class AccessTokenExpired(AuthError):
+    """The local access token needs renewal before another quota GET."""
+
+
 @dataclass(frozen=True)
 class LoginChallenge:
     url: str
@@ -200,7 +204,7 @@ class AuthSession:
 
     def _snapshot(self, value):
         if value["expires_at"] <= time.time() + 15:
-            raise AuthError("Access token is expired or near expiry; this command will not refresh it.")
+            raise AccessTokenExpired("Access token is expired or near expiry; this command will not refresh it.")
         raw = self.request(USAGE_URL, access_token=value["access_token"], account_id=value["account_id"])
         snapshot = parse_snapshot(raw, value["account_id"])
         if snapshot.account_matches is not True:
