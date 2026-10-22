@@ -35,6 +35,31 @@ def _constant(_):
     raise ValueError("non-finite value")
 
 
+def _read_record(directory, name):
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=directory)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise StorageError("Cannot read the private state record.") from None
+    try:
+        with os.fdopen(descriptor, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            _private(info)
+            if info.st_size > MAX_RECORD_BYTES:
+                raise StorageError("State record exceeds the size limit.")
+            data = stream.read(MAX_RECORD_BYTES + 1)
+            if len(data) > MAX_RECORD_BYTES:
+                raise StorageError("State record exceeds the size limit.")
+        value = json.loads(data, object_pairs_hook=_object, parse_constant=_constant)
+        if not isinstance(value, dict):
+            raise ValueError("not an object")
+        return value
+    except (OSError, ValueError, RecursionError):
+        raise StorageError("State record is invalid; preserve it for recovery.") from None
+
+
 class StateStore:
     """Hold one process lock while reading and replacing records.
 
@@ -83,28 +108,7 @@ class StateStore:
 
     def read(self, name):
         self._check(name)
-        try:
-            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                                 dir_fd=self._directory)
-        except FileNotFoundError:
-            return None
-        except OSError:
-            raise StorageError("Cannot read the private state record.") from None
-        try:
-            with os.fdopen(descriptor, "rb") as stream:
-                info = os.fstat(stream.fileno())
-                _private(info)
-                if info.st_size > MAX_RECORD_BYTES:
-                    raise StorageError("State record exceeds the size limit.")
-                data = stream.read(MAX_RECORD_BYTES + 1)
-                if len(data) > MAX_RECORD_BYTES:
-                    raise StorageError("State record exceeds the size limit.")
-            value = json.loads(data, object_pairs_hook=_object, parse_constant=_constant)
-            if not isinstance(value, dict):
-                raise ValueError("not an object")
-            return value
-        except (OSError, ValueError, RecursionError):
-            raise StorageError("State record is invalid; preserve it for recovery.") from None
+        return _read_record(self._directory, name)
 
     def write(self, name, value):
         self._check(name)
@@ -137,3 +141,24 @@ class StateStore:
                 os.unlink(temporary, dir_fd=self._directory)
             except FileNotFoundError:
                 pass
+
+
+def read_snapshot(path, name):
+    """Read one atomically replaced record without creating files or taking a lease.
+
+    For offline observation only: this does not serialize a read/modify/write
+    transaction or establish consistency between multiple records.
+    """
+    if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}\.json", name):
+        raise StorageError("Invalid state record name.")
+    try:
+        directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise StorageError("Cannot open the private snapshot directory.") from None
+    try:
+        _private(os.fstat(directory), directory=True)
+        return _read_record(directory, name)
+    finally:
+        os.close(directory)

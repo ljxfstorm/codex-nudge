@@ -10,6 +10,7 @@ import warnings
 
 from .auth import AuthError, AuthSession
 from .config import ConfigError, absolute_path, create as create_config, load as load_config
+from .diagnostics import collect as collect_diagnostics
 from .identity import IdentityError
 from .quota import QuotaError
 from .inference import InferenceError
@@ -47,6 +48,7 @@ def _parser():
     status.add_argument("--offline", action="store_true", help="inspect local state without network access")
     doctor = commands.add_parser("doctor", help="diagnose local readiness; offline by default")
     doctor.add_argument("--online", action="store_true", help="also verify quota with a GET; never refresh")
+    commands.add_parser("diagnostics", help="print an offline, redacted JSON report; no credentials or raw logs")
     watch = commands.add_parser("watch", help="observe five-hour windows using configuration or explicit mode")
     _send_options(watch)
     watch.add_argument("--once", action="store_true", help="take one observation and send at most once; verification may need later runs")
@@ -82,6 +84,9 @@ def main(argv=None):
         state_dir = absolute_path(args.state_dir) if args.state_dir else settings.state_dir if settings else None
         if state_dir is None:
             parser.error("provide --state-dir or a configuration with --config")
+        if args.command == "diagnostics":
+            print(json.dumps(collect_diagnostics(state_dir, settings=settings), allow_nan=False, indent=2))
+            return 0
         if args.command == "login":
             recovery = args.resume or args.verify or args.refresh
             if recovery and args.client_id:
