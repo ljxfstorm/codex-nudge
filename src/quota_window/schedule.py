@@ -1,9 +1,10 @@
 """Persistent classification of one ordinary Codex five-hour window."""
 
 import math
+import time
 import uuid
 
-from .inference import usage_counts
+from .inference import InferenceError, usage_counts
 
 
 DURATION = 18000
@@ -198,3 +199,55 @@ class Schedule:
             else:
                 delay = min(delay, 30)
         return max(0.1, delay)
+
+
+class PersistentSchedule:
+    """Own schedule saves and attempt recovery under the caller's watch lease.
+
+    The pure Schedule remains responsible for window timing. Callers never
+    need to inspect attempt phases or save changes after a failed transition.
+    """
+
+    def __init__(self, store, binding):
+        self._store = store
+        self._schedule = Schedule(store.read("schedule.json"), binding)
+
+    def observe(self, snapshot, started, now):
+        try:
+            decision = self._schedule.observe(snapshot, started, now)
+        except ScheduleError:
+            attempt = self._schedule.data["attempt"]
+            if attempt and attempt["phase"] == "blocked":
+                self._save()
+            raise
+        self._save()
+        return decision
+
+    def wake_once(self, session):
+        def reserve(snapshot, started, finished):
+            prepared = self._schedule.prepare(snapshot, started, finished)
+            self._save()
+            return prepared
+
+        try:
+            usage = session.wake_once(reserve)
+        except InferenceError as error:
+            attempt = self._schedule.data["attempt"]
+            if attempt and attempt["phase"] == "sending":
+                attempt.update(phase="blocked", failure={"kind": "inference_response",
+                               "http_status": error.http_status, "content_type": error.content_type})
+                self._save()
+            raise
+        if usage is None:
+            return None
+        self._schedule.completed(usage, time.time())
+        self._save()
+        attempt = self._schedule.data["attempt"]
+        return {"usage": usage, "attempt_id": attempt["id"],
+                "started_at": attempt["started_at"], "finished_at": attempt["finished_at"]}
+
+    def delay(self, now, interval=300):
+        return self._schedule.delay(now, interval)
+
+    def _save(self):
+        self._store.write("schedule.json", self._schedule.data)

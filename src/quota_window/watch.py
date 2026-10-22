@@ -11,7 +11,7 @@ from .auth import AccessTokenExpired, AuthError, AuthSession
 from .identity import IdentityError
 from .inference import MODEL, RECIPE, InferenceError
 from .quota import QuotaError
-from .schedule import Schedule, ScheduleError
+from .schedule import PersistentSchedule, ScheduleError
 from .storage import StateStore, StorageError
 from .transport import TransportError
 
@@ -182,9 +182,9 @@ def run(directory, *, send=False, once=False, interval=300, emit=None):
         health = _Health(store, send)
         with _termination():
             try:
-                engine = Schedule(store.read("schedule.json"), binding)
+                engine = PersistentSchedule(store, binding)
                 emit({"event": "watcher_started", "version": __version__, "automatic_requests_enabled": send})
-                _loop(session, store, engine, health, send=send, once=once, interval=interval, emit=emit)
+                _loop(session, engine, health, send=send, once=once, interval=interval, emit=emit)
             except BaseException as error:
                 try:
                     health.stop(error)
@@ -196,7 +196,7 @@ def run(directory, *, send=False, once=False, interval=300, emit=None):
             health.stop()
 
 
-def _loop(session, store, engine, health, *, send, once, interval, emit):
+def _loop(session, engine, health, *, send, once, interval, emit):
     while True:
         _ready(session, send=send, once=once, emit=emit, health=health)
         try:
@@ -208,39 +208,15 @@ def _loop(session, store, engine, health, *, send, once, interval, emit):
             # Read backoff can outlast the access token. Return to the explicit
             # renewal path rather than hiding a POST inside the GET retry loop.
             continue
-        try:
-            decision = engine.observe(snapshot, started, now)
-        except ScheduleError:
-            if engine.data["attempt"] and engine.data["attempt"]["phase"] == "blocked":
-                store.write("schedule.json", engine.data)
-            raise
-        store.write("schedule.json", engine.data)
+        decision = engine.observe(snapshot, started, now)
         window = snapshot.five_hour_window()
         emit({"event": decision, "at": now, "automatic_requests_enabled": send,
               "reset_at": window.resets_at, "remaining_percent": window.remaining_percent})
         if decision == "idle_window" and send and snapshot.ordinary_usage_allowed is True:
-            def reserve(latest, query_start, query_finish):
-                prepared = engine.prepare(latest, query_start, query_finish)
-                store.write("schedule.json", engine.data)
-                return prepared
-
             health.update(phase="requesting", next_action="wake_request", next_action_at=None)
-            try:
-                usage = session.wake_once(reserve)
-            except InferenceError as error:
-                attempt = engine.data["attempt"]
-                if attempt and attempt["phase"] == "sending":
-                    attempt.update(phase="blocked", failure={"kind": "inference_response",
-                                   "http_status": error.http_status, "content_type": error.content_type})
-                    store.write("schedule.json", engine.data)
-                raise
-            if usage is not None:
-                engine.completed(usage, time.time())
-                store.write("schedule.json", engine.data)
-                attempt = engine.data["attempt"]
-                emit({"event": "inference_completed", "recipe": RECIPE, "model": MODEL, "usage": usage,
-                      "attempt_id": attempt["id"], "started_at": attempt["started_at"],
-                      "finished_at": attempt["finished_at"]})
+            completed = engine.wake_once(session)
+            if completed is not None:
+                emit({"event": "inference_completed", "recipe": RECIPE, "model": MODEL, **completed})
             else:
                 emit({"event": "preflight_cancelled"})
         # --once means one observation and at most one send; later runs can

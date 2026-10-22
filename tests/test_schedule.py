@@ -1,8 +1,11 @@
 import copy
+from pathlib import Path
+import tempfile
 import unittest
 
 from quota_window.quota import QuotaError, Snapshot, Window
-from quota_window.schedule import Schedule, ScheduleError
+from quota_window.schedule import PersistentSchedule, Schedule, ScheduleError
+from quota_window.storage import StateStore
 
 
 BINDING = "a" * 64
@@ -134,3 +137,41 @@ class ScheduleTests(unittest.TestCase):
             mutate(value)
             with self.assertRaises(ScheduleError):
                 Schedule(value, BINDING)
+
+
+class PersistentScheduleTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.store = StateStore(Path(temporary.name) / "watch")
+        self.store.__enter__()
+        self.addCleanup(self.store.__exit__)
+        # Synthetic v0.1.3 record: the existing on-disk format must still load.
+        self.store.write("schedule.json", {"schema": 1, "binding": BINDING, "observed_at": 102,
+            "window": {"phase": "ready", "deadline": 18100,
+                       "candidate": {"at": 102, "query_started": 102, "reset": 18102}},
+            "attempt": {"id": "synthetic-attempt", "phase": "completed", "started_at": 102,
+                        "finished_at": 103, "usage": USAGE.copy(), "samples": []}})
+
+    def test_completed_v1_record_resumes_verification_across_restarts(self):
+        engine = PersistentSchedule(self.store, BINDING)
+        self.assertEqual(engine.delay(103), 5)
+        self.assertEqual(engine.observe(snapshot(108, reset=18102), 108, 108), "verification_sample")
+        restored = PersistentSchedule(self.store, BINDING)
+        self.assertEqual(restored.observe(snapshot(138, reset=18102), 138, 138), "fixed_reset_observed")
+        saved = self.store.read("schedule.json")
+        self.assertEqual(saved["schema"], 1)
+        self.assertEqual(saved["attempt"]["id"], "synthetic-attempt")
+        self.assertEqual(saved["attempt"]["phase"], "verified")
+        self.assertEqual(saved["attempt"]["usage"], USAGE)
+
+    def test_failed_verification_is_saved_before_the_error_reaches_the_caller(self):
+        engine = PersistentSchedule(self.store, BINDING)
+        engine.observe(snapshot(108, reset=18102), 108, 108)
+        with self.assertRaises(ScheduleError):
+            engine.observe(snapshot(138), 138, 138)
+        saved = self.store.read("schedule.json")
+        self.assertEqual(saved["attempt"]["phase"], "blocked")
+        with self.assertRaises(ScheduleError):
+            PersistentSchedule(self.store, BINDING)
+        self.assertEqual(self.store.read("schedule.json"), saved)
