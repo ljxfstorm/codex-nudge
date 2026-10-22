@@ -1,8 +1,8 @@
-# Codex quota window tool
+# Codex Nudge
 
-项目名待定。面向单账号 Linux 服务器的轻量 CLI，用于观测 Codex 额度窗口，并在显式开启后，以低消耗请求启动新的窗口。
+候选项目名为 `codex-nudge`，等待最终确认。面向单账号 Linux 服务器的轻量 CLI，用于观测 Codex 额度窗口，并在显式开启后，以低消耗请求启动新的窗口。
 
-当前仓库提供开发态 CLI：配置、独立浏览器登录、显式续期、认证恢复、额度查询、本地诊断、5h watch 和 systemd 用户服务文件生成。尚无可安装发行包。它是独立的新仓库，不包含原型的 Git 历史、凭据或运行数据；quota_window 为内部暂用包名，不代表最终项目名。
+当前仓库提供 CLI 和本地候选 wheel/sdist：配置、独立浏览器登录、显式续期、认证恢复、额度查询、本地诊断、5h watch 和 systemd 用户服务文件生成。尚未发布公开 Release。它是独立的新仓库，不包含原型的 Git 历史、凭据或运行数据；`quota_window` 为内部 Python 包名，安装后的候选命令为 `codex-nudge`。
 
 首版聚焦已经实测的 5h 调度：识别实际 bucket 和时长，区分移动 reset 与已启动窗口，发送后复核固定锚点。其他套餐、weekly 和额外 reset 机制需要独立验证。
 
@@ -11,6 +11,19 @@
 保持单账号、本地运行的范围。默认只读；自动发送采用持久化去重，结果不明时停止并提供恢复信息。账号配对、实际 token 记录及脱敏诊断属于首版范围。
 
 开发约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。许可为 [MIT](LICENSE)。
+
+## 安装候选发行包
+
+Linux，Python 3.10 或更新版本。将下载或本地构建的固定版本 wheel 交给 uv 安装；无需安装 Codex：
+
+```sh
+uv tool install /path/to/codex_nudge-0.1.0-py3-none-any.whl
+codex-nudge --version
+```
+
+单次 Linux x86_64 安装测量：wheel 约 33 KiB；独立 Python 3.10 工具环境含依赖约 16.9 MiB，解释器与标准库目录约 88.8 MiB。目录占用不等于新增磁盘成本，且不包含 uv 安装器、下载缓存和主机系统库；不同平台与依赖版本会变化。
+
+后面的示例使用开发态 `PYTHONPATH=src .venv/bin/python -m quota_window`，安装后将该前缀替换为 `codex-nudge` 即可，其他参数一致。不要把工具安装到会被清理的临时目录；服务引用安装环境的绝对路径。卸载前先停止并禁用已安装的用户服务，再执行 `uv tool uninstall codex-nudge`；卸载不会删除私有凭据和状态。
 
 ## 开发态使用
 
@@ -31,7 +44,7 @@ PYTHONPATH=src .venv/bin/python -m quota_window --config /your/private/config/se
 
 访问令牌到期时，显式运行 `login --refresh`。若状态为 `verification_pending`，运行 `login --verify` 复核已保存的新凭据；仍在等待回调时可用 `login --resume`。交换或续期结果不明时，用 `login --client-id YOUR_COMPATIBILITY_CLIENT_ID --reauthorize` 重新授权，不重发原请求。详细状态约束见 [认证与恢复](docs/architecture.md)。
 
-兼容路径需要显式 client ID，不内置第三方注册默认值。技术验证不代表这条兼容路径具有官方公共 API 支持或分发许可；正式发布前仍需完成相关审查。
+兼容路径需要显式 client ID，不内置第三方注册默认值。这是独立社区工具，采用实验性的 Codex 兼容认证及后端协议，不会增加订阅额度，也没有平台对该路径或定时唤醒用途的公开支持承诺；使用仍受账号适用条款约束。
 
 ## 观测与自动发送
 
@@ -67,7 +80,7 @@ PYTHONPATH=src .venv/bin/python -m quota_window --config /your/private/config/se
 
 ## systemd 用户服务
 
-`service` 只向标准输出生成用户服务文件，不安装或启动服务。开发态服务引用当前解释器和源码的绝对路径；移动 checkout 或 venv 后需要重新生成，临时目录不适合长期部署。解释器路径不能含引号、反斜杠，开发态源码路径不能含 `:`。
+`service` 只向标准输出生成用户服务文件，不安装或启动服务。服务引用当前解释器与 Python 包的绝对路径；开发态引用 checkout，安装态引用工具环境。移动 checkout 或工具环境后需要重新生成，临时目录不适合长期部署。解释器路径不能含引号、反斜杠，开发态源码路径不能含 `:`。
 
 先生成强制只读的服务并检查。以下 `quota-window-dev.service` 是开发态示例文件名：
 

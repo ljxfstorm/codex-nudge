@@ -8,6 +8,7 @@ import json
 import sys
 import warnings
 
+from . import __version__
 from .auth import AuthError, AuthSession
 from .config import ConfigError, absolute_path, create as create_config, load as load_config
 from .diagnostics import collect as collect_diagnostics
@@ -30,6 +31,7 @@ def _quota(snapshot):
 
 def _parser():
     parser = argparse.ArgumentParser(description="Observe one Codex quota account independently.")
+    parser.add_argument("--version", action="version", version="%(prog)s " + __version__)
     parser.add_argument("--config", help="private JSON configuration file")
     parser.add_argument("--state-dir", help="private state directory; overrides configuration")
     commands = parser.add_subparsers(dest="command", required=True)

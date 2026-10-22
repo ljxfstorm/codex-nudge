@@ -1,0 +1,44 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        python: ['3.10', '3.13']
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: '0.12.22'
+          python-version: ${{ matrix.python }}
+          enable-cache: false
+      - name: Install and test
+        run: |
+          uv venv
+          uv pip install -r requirements.txt
+          .venv/bin/python -m unittest discover -s tests -v
+      - name: Build and inspect distributions
+        run: |
+          uv build
+          .venv/bin/python scripts/check_dist.py dist
+      - name: Install the wheel as an isolated tool
+        env:
+          UV_TOOL_DIR: ${{ runner.temp }}/tools
+          UV_TOOL_BIN_DIR: ${{ runner.temp }}/tool-bin
+        run: |
+          uv tool install dist/*.whl
+          "$UV_TOOL_BIN_DIR/codex-nudge" --version
+          "$UV_TOOL_BIN_DIR/codex-nudge" --state-dir "$RUNNER_TEMP/absent" diagnostics > "$RUNNER_TEMP/diagnostics.json"
+          .venv/bin/python -c 'import json, os, pathlib; root=pathlib.Path(os.environ["RUNNER_TEMP"]); report=json.loads((root/"diagnostics.json").read_text()); assert report["offline"] and report["authentication"]["record"]=="missing"; assert not (root/"absent").exists()'

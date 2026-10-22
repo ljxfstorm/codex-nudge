@@ -2,7 +2,7 @@
 
 ## 工作方式
 
-main 保持可安装、可运行；当前初始化骨架尚无程序。后续使用短期分支，每项修改解决一个具体问题。远端建立后通过 PR 合入；本地阶段用分支 diff 审阅，不为模拟 PR 引入额外工具。
+main 保持可安装、可运行。使用短期分支，每项修改解决一个具体问题。远端建立后通过 PR 合入；本地阶段用分支 diff 审阅，不为模拟 PR 引入额外工具。
 
 日常实现直接推进。改变自动发送语义、认证路径、增加依赖或扩大产品范围时，先说明必要性及取舍。按问题复杂度记录决定，不强制每个修改都建 issue、ADR 或设计文档。
 
@@ -34,7 +34,7 @@ uv pip install --python .venv/bin/python -r requirements.txt
 PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 ```
 
-当前实现要求 Python 3.10 或更新版本，已在 Python 3.13 验证。测试只使用临时目录、合成数据和本地子进程，不访问账户或网络；身份测试使用真实 RSA 签名，不跳过加密依赖。项目名及打包元数据确定后再补安装与构建命令。
+当前实现要求 Python 3.10 或更新版本，已在 Python 3.13 验证。测试只使用临时目录、合成数据和本地子进程，不访问账户或网络；身份测试使用真实 RSA 签名，不跳过加密依赖。`requirements.txt` 通过可编辑安装引用 pyproject.toml，运行依赖只维护一处。
 
 两项 systemd 原生验收默认跳过，需要 Linux 用户管理器和访问它的权限时单独运行：
 
@@ -46,7 +46,14 @@ QUOTA_WINDOW_SYSTEMD_TESTS=1 PYTHONPATH=src .venv/bin/python -m unittest discove
 
 修复缺陷先复现，再验证修复。调度、认证、持久状态及恢复逻辑需要自动化回归测试。常规测试使用假凭据和假传输，离线执行；真实请求实验独立记录版本、usage 及窗口证据。
 
-实现时补充实际测试与构建命令，再配置所需 CI。发布验收包括干净环境安装、从仓库外运行、发行文件清单和 systemd 原生解析及实际传参。没有程序之前不建立空转 CI 或为文档添加形式化测试。
+构建候选发行包并检查文件清单、元数据及校验和：
+
+```sh
+uv build
+.venv/bin/python scripts/check_dist.py dist
+```
+
+构建后端 Hatchling 仅用于构建，不增加运行依赖。CI 在 Linux/Python 3.10 和 3.13 上运行离线测试、构建和隔离 wheel 安装；账号与原生 systemd 实测独立进行。发布前从干净目录安装固定 wheel、测试控制台命令和 sdist 重建，核对实际解释器/依赖成本，使用同一提交生成版本、tag 与 Release。候选名称仍待确认；校验和在 dist/SHA256SUMS，发行包不得包含私有状态。
 
 ## 数据与依赖
 

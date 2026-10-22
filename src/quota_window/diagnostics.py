@@ -6,6 +6,7 @@ import platform
 from pathlib import Path
 import time
 
+from . import __version__
 from .inference import InferenceError, safe_content_type, usage_counts
 from .storage import StorageError, read_snapshot
 
@@ -49,7 +50,7 @@ def collect(directory, *, settings=None):
         except PackageNotFoundError:
             dependencies[name] = None
     report = {"schema": 1, "offline": True,
-              "runtime": {"python": platform.python_version(), "system": platform.system(),
+              "runtime": {"version": __version__, "python": platform.python_version(), "system": platform.system(),
                           "machine": platform.machine(), "dependencies": dependencies},
               "configuration": {"provided": settings is not None,
                                 "watch_send": settings.send if settings else False,

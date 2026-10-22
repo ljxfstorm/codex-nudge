@@ -1,1 +1,3 @@
-"""Core for the quota window CLI; project and command names are pending."""
+"""Core implementation for the Codex quota window CLI."""
+
+__version__ = "0.1.0"
