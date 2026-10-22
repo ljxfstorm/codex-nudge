@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 — Unreleased
+## 0.1.0 — 2026-10-22
 
 首个实验性版本，名称为 codex-nudge。
 
