@@ -367,6 +367,39 @@ class WatchTests(unittest.TestCase):
                     watch.run(self.directory)
                 sleep.assert_not_called()
 
+    def test_read_retry_honors_server_delay_and_existing_backoff(self):
+        for status, server, expected in ((429, 600, 600), (429, 10, 300),
+                                         (503, 90, 90), (503, 0, 5)):
+            with self.subTest(status=status, server=server):
+                self.query_errors = [TransportError("busy", status=status, retry_after=server)]
+
+                def emit(event):
+                    if event["event"] == "read_retry":
+                        self.assertEqual(event["delay_seconds"], expected)
+                        self.assertEqual(self.health()["next_action_at"], self.now + expected)
+
+                with patch.object(watch, "sleep_for", side_effect=KeyboardInterrupt) as sleep, \
+                        self.assertRaises(KeyboardInterrupt):
+                    watch.run(self.directory, emit=emit)
+                sleep.assert_called_once_with(expected)
+
+    def test_exhausted_reads_wait_for_last_server_delay_before_supervisor_restart(self):
+        self.query_errors = [TransportError("busy", status=503)] * 3 + [
+            TransportError("busy", status=503, retry_after=900)]
+        with patch.object(watch, "sleep_for") as sleep, self.assertRaisesRegex(TransportError, "budget exhausted"):
+            watch.run(self.directory, emit=self.events.append)
+        self.assertEqual(self.gets, 4)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 15, 45, 900])
+        self.assertEqual(self.events[-1]["event"], "read_cooldown")
+        self.assertEqual(self.health()["read_retries"], 3)
+
+    def test_one_shot_does_not_wait_for_retry_after(self):
+        self.query_errors = [TransportError("busy", status=429, retry_after=600)]
+        with patch.object(watch, "sleep_for") as sleep, self.assertRaises(TransportError):
+            self.run_once()
+        sleep.assert_not_called()
+        self.assertEqual((self.gets, self.refreshes, self.sent), (1, 0, 0))
+
     def test_enabled_watch_recovers_saved_credentials_without_refreshing_again(self):
         with StateStore(self.directory) as store:
             value = store.read("credentials.json")

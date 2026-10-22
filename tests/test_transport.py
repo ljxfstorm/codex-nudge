@@ -59,6 +59,26 @@ class TransportTests(unittest.TestCase):
             self.assertNotIn("SYNTHETIC_SECRET", str(caught.exception))
             build.return_value.open.assert_called_once()
 
+    def test_retry_after_accepts_seconds_and_http_dates(self):
+        for header, expected in (("600", 600), (" 0 ", 0),
+                                 ("Thu, 01 Jan 1970 00:10:00 GMT", 500),
+                                 ("Thu, 01 Jan 1970 00:00:00 GMT", 0)):
+            with self.subTest(header=header), patch.object(transport.time, "time", return_value=100):
+                error = HTTPError("https://chatgpt.com/backend-api/wham/usage", 429, "busy",
+                                  {"Retry-After": header}, io.BytesIO(b"{}"))
+                caught = transport._http_error(error)
+                self.assertEqual(caught.retry_after, expected)
+
+    def test_invalid_retry_after_is_ignored_without_disclosure(self):
+        for header in (None, "", "-1", "1.5", "NaN", "inf", "PRIVATE_HEADER", "9" * 129,
+                       "Thu, 01 Jan 1970 00:10:00", "999999999999999999999999999 GMT"):
+            with self.subTest(header=header):
+                headers = {} if header is None else {"Retry-After": header}
+                error = HTTPError("https://chatgpt.com/backend-api/wham/usage", 503, "busy", headers, io.BytesIO(b"{}"))
+                caught = transport._http_error(error)
+                self.assertIsNone(caught.retry_after)
+                self.assertNotIn("PRIVATE_HEADER", str(caught))
+
     def test_bad_or_oversized_json_is_rejected_without_body_disclosure(self):
         for data in (b'{"x":1,"x":2}', b'{"x":NaN}', b'[]', b'{"SYNTHETIC_SECRET":',
                      b"x" * (transport.MAX_RESPONSE_BYTES + 1)):

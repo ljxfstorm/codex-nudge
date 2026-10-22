@@ -64,7 +64,7 @@ journalctl --user -u codex-nudge.service -f
 
 自动发送需以 `service --send` 重新生成、安装文件，再 daemon-reload 并 restart。切换前停止其他自动唤醒服务；不同目录的工具不共享锁。SSH 断开后是否继续运行取决于主机的用户 linger 设置，本工具不修改它。
 
-持续 watch 的普通额度与凭据验证 GET 遇到临时网络/5xx 错误时，依次等待 5、15、45 秒，最多额外尝试 3 次；429 每次至少等待 300 秒。仍失败时由 systemd 等待 300 秒再重启。`--once` 不等待重试，发送前预检失败交给下次进程重新观测；认证、协议和状态错误停止。停止并禁用用 `systemctl --user disable --now codex-nudge.service`。更新代码前先停止服务，切换到目标 tag，执行 `uv sync --locked`，重新生成服务文件，再启动；移动仓库或环境也需重新生成。
+持续 watch 的普通额度与凭据验证 GET 遇到临时网络/5xx 错误时，依次等待 5、15、45 秒，最多额外尝试 3 次；429 每次至少等待 300 秒。可重试 GET 的 `Retry-After` 支持秒数和 HTTP 日期，等待取服务端要求与本地退避的较大值；最后一次失败仍先等待该响应指定的时间，再由 systemd 等待 300 秒重启。等待不跨手动重启保留。`--once` 不等待重试，发送前预检失败交给下次进程重新观测；认证、协议和状态错误停止。停止并禁用用 `systemctl --user disable --now codex-nudge.service`。更新代码前先停止服务，切换到目标 tag，执行 `uv sync --locked`，重新生成服务文件，再启动；移动仓库或环境也需重新生成。
 
 ## 恢复与反馈
 

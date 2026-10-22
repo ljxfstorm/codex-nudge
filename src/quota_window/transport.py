@@ -1,9 +1,11 @@
 """Bounded OpenAI JSON requests with no redirects or automatic retries."""
 
+from email.utils import parsedate_to_datetime
 from http.client import HTTPException
 import json
 import math
 import re
+import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -17,12 +19,13 @@ ALLOWED_HOSTS = frozenset({"auth.openai.com", "chatgpt.com"})
 class TransportError(Exception):
     """Contains only status and whitelisted codes, never raw request/body data."""
 
-    def __init__(self, message, *, status=None, error_code=None, error_type=None, retryable=None):
+    def __init__(self, message, *, status=None, error_code=None, error_type=None, retryable=None, retry_after=None):
         super().__init__(message)
         self.status = status
         self.error_code = error_code
         self.error_type = error_type
         self.retryable = (status is None or status == 429 or 500 <= status <= 599) if retryable is None else retryable
+        self.retry_after = retry_after
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -50,8 +53,24 @@ def _decode(data):
     return value
 
 
+def _retry_after(value):
+    if not isinstance(value, str) or not 1 <= len(value) <= 128:
+        return None
+    value = value.strip()
+    if re.fullmatch(r"[0-9]+", value):
+        return int(value)
+    try:
+        date = parsedate_to_datetime(value)
+        if date.tzinfo is not None:
+            return max(0, date.timestamp() - time.time())
+    except (ValueError, TypeError, OverflowError):
+        pass
+    return None
+
+
 def _http_error(error):
     fields = {}
+    retry_after = _retry_after(error.headers.get("Retry-After")) if error.headers is not None else None
     try:
         data = error.read(MAX_ERROR_BYTES + 1)
         detail = _decode(data).get("error") if len(data) <= MAX_ERROR_BYTES else None
@@ -64,7 +83,8 @@ def _http_error(error):
         pass
     finally:
         error.close()
-    return TransportError(f"OpenAI HTTP {error.code}; no retry sent.", status=error.code, **fields)
+    return TransportError(f"OpenAI HTTP {error.code}; no retry sent.", status=error.code,
+                          retry_after=retry_after, **fields)
 
 
 def request_json(url, *, body=None, form=False, access_token=None, account_id=None, timeout=15):

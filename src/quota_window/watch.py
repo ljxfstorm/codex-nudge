@@ -85,18 +85,24 @@ def _read(action, *, operation, once, emit, health, initial_error=None):
                 return result, started, finished
         if once or not error.retryable:
             raise error
-        if failures == len(READ_RETRY_DELAYS):
+        exhausted = failures == len(READ_RETRY_DELAYS)
+        delay = 0 if exhausted else READ_RETRY_DELAYS[failures]
+        if not exhausted:
+            if error.status == 429:
+                delay = max(delay, 300)
+            failures += 1
+        delay = max(delay, error.retry_after or 0)
+        if delay:
+            health.update(phase="retrying", read_retries=failures, next_action=operation,
+                          next_action_at=time.time() + delay, last_error=_failure(error), last_error_at=time.time())
+            emit({"event": "read_cooldown" if exhausted else "read_retry", "operation": operation,
+                  "retry": failures, "delay_seconds": delay, "http_status": error.status})
+            sleep_for(delay)
+        if exhausted:
+            # Honor the final response's delay before the supervisor can restart
+            # us; the request budget remains four attempts.
             raise TransportError("GET retry budget exhausted after four attempts.", status=error.status,
                                  error_code=error.error_code, error_type=error.error_type) from None
-        delay = READ_RETRY_DELAYS[failures]
-        if error.status == 429:
-            delay = max(delay, 300)
-        failures += 1
-        health.update(phase="retrying", read_retries=failures, next_action=operation,
-                      next_action_at=time.time() + delay, last_error=_failure(error), last_error_at=time.time())
-        emit({"event": "read_retry", "operation": operation, "retry": failures,
-              "delay_seconds": delay, "http_status": error.status})
-        sleep_for(delay)
         error = None
 
 
