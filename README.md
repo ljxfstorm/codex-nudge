@@ -64,11 +64,11 @@ journalctl --user -u codex-nudge.service -f
 
 自动发送需以 `service --send` 重新生成、安装文件，再 daemon-reload 并 restart。切换前停止其他自动唤醒服务；不同目录的工具不共享锁。SSH 断开后是否继续运行取决于主机的用户 linger 设置，本工具不修改它。
 
-可重试传输错误等待 300 秒后重启；认证、协议和状态错误停止。停止并禁用用 `systemctl --user disable --now codex-nudge.service`。更新代码前先停止服务，切换到目标 tag，执行 `uv sync --locked`，重新生成服务文件，再启动；移动仓库或环境也需重新生成。
+持续 watch 的普通额度与凭据验证 GET 遇到临时网络/5xx 错误时，依次等待 5、15、45 秒，最多额外尝试 3 次；429 每次至少等待 300 秒。仍失败时由 systemd 等待 300 秒再重启。`--once` 不等待重试，发送前预检失败交给下次进程重新观测；认证、协议和状态错误停止。停止并禁用用 `systemctl --user disable --now codex-nudge.service`。更新代码前先停止服务，切换到目标 tag，执行 `uv sync --locked`，重新生成服务文件，再启动；移动仓库或环境也需重新生成。
 
 ## 恢复与反馈
 
-凭据到期可显式 `login --refresh`。`verification_pending` 使用 `login --verify`，等待回调时使用 `login --resume`。授权交换或续期结果不明时，用 `login --reauthorize` 重新授权，保留配置中的同一 client ID。推理结果不明时保留状态，不通过删除记录强制重试；具体阶段见[架构与恢复](docs/architecture.md)。
+凭据到期可显式 `login --refresh`。发送模式的 watcher 会对已保存的 `verification_pending` 凭据自动恢复 GET 验证，也可显式 `login --verify`；只读 watch 仍要求显式验证。等待回调时使用 `login --resume`。授权交换或续期结果不明时，用 `login --reauthorize` 重新授权，保留配置中的同一 client ID。推理结果不明时保留状态，不通过删除记录强制重试；具体阶段见[架构与恢复](docs/architecture.md)。
 
 脱敏诊断可在 watcher 运行时导出，不联网，也不创建或修改状态：
 

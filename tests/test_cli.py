@@ -196,6 +196,7 @@ class CliTests(unittest.TestCase):
 
     def test_fatal_watch_errors_stop_service_and_temporary_reads_allow_restart(self):
         for error, expected in ((ScheduleError("uncertain attempt"), 2),
+                                (TransportError("invalid JSON", retryable=False), 2),
                                 (TransportError("unauthorized", status=401), 2),
                                 (TransportError("unsupported", status=400), 2),
                                 (TransportError("disconnected"), 1),

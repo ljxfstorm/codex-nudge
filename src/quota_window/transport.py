@@ -17,11 +17,12 @@ ALLOWED_HOSTS = frozenset({"auth.openai.com", "chatgpt.com"})
 class TransportError(Exception):
     """Contains only status and whitelisted codes, never raw request/body data."""
 
-    def __init__(self, message, *, status=None, error_code=None, error_type=None):
+    def __init__(self, message, *, status=None, error_code=None, error_type=None, retryable=None):
         super().__init__(message)
         self.status = status
         self.error_code = error_code
         self.error_type = error_type
+        self.retryable = (status is None or status == 429 or 500 <= status <= 599) if retryable is None else retryable
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -80,15 +81,15 @@ def request_json(url, *, body=None, form=False, access_token=None, account_id=No
     except (TypeError, ValueError):
         allowed = False
     if not allowed:
-        raise TransportError("Request endpoint is not an allowed OpenAI HTTPS origin.")
+        raise TransportError("Request endpoint is not an allowed OpenAI HTTPS origin.", retryable=False)
     if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
             or not math.isfinite(timeout) or not 0 < timeout <= 60):
-        raise TransportError("Request timeout must be between zero and 60 seconds.")
+        raise TransportError("Request timeout must be between zero and 60 seconds.", retryable=False)
     headers = {"Accept": "application/json", "User-Agent": "quota-window-development/0"}
     for value, header in ((access_token, "Authorization"), (account_id, "ChatGPT-Account-Id")):
         if value is not None:
             if not isinstance(value, str) or not value or any(ord(c) < 33 or ord(c) > 126 for c in value):
-                raise TransportError("Invalid authentication header value.")
+                raise TransportError("Invalid authentication header value.", retryable=False)
             headers[header] = "Bearer " + value if header == "Authorization" else value
     try:
         data = None if body is None else (urlencode(body).encode() if form else
@@ -97,7 +98,7 @@ def request_json(url, *, body=None, form=False, access_token=None, account_id=No
             headers["Content-Type"] = "application/x-www-form-urlencoded" if form else "application/json"
         request = Request(url, data=data, headers=headers, method="GET" if body is None else "POST")
     except (ValueError, TypeError, RecursionError):
-        raise TransportError("Request arguments could not be encoded.") from None
+        raise TransportError("Request arguments could not be encoded.", retryable=False) from None
     try:
         with build_opener(NoRedirect()).open(request, timeout=timeout) as response:
             data = response.read(MAX_RESPONSE_BYTES + 1)
@@ -106,8 +107,8 @@ def request_json(url, *, body=None, form=False, access_token=None, account_id=No
     except (URLError, OSError, HTTPException):
         raise TransportError("Network request failed; no retry sent. Its outcome may be unknown.") from None
     if len(data) > MAX_RESPONSE_BYTES:
-        raise TransportError("Response exceeded the size limit.")
+        raise TransportError("Response exceeded the size limit.", retryable=False)
     try:
         return _decode(data)
     except (ValueError, RecursionError):
-        raise TransportError("Response was not a valid JSON object.") from None
+        raise TransportError("Response was not a valid JSON object.", retryable=False) from None

@@ -146,8 +146,7 @@ def main(argv=None):
         return 0
     except TransportError as error:
         print(str(error), file=sys.stderr)
-        temporary = error.status is None or error.status == 429 or error.status >= 500
-        return 2 if args.command == "watch" and not temporary else 1
+        return 2 if args.command == "watch" and not error.retryable else 1
     except (AuthError, IdentityError, QuotaError, StorageError, InferenceError, ScheduleError, ConfigError, ServiceError) as error:
         print(str(error), file=sys.stderr)
         return 2 if args.command == "watch" else 1

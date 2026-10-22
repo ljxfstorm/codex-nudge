@@ -22,6 +22,7 @@ class WatchTests(unittest.TestCase):
         self.sent = 0
         self.refreshes = 0
         self.gets = 0
+        self.query_errors = []
         self.anchor = None
         self.allowed = True
         self.fail_send = False
@@ -48,6 +49,10 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(url, auth.USAGE_URL)
         self.assertEqual(kwargs["account_id"], "synthetic-account")
         self.gets += 1
+        if self.query_errors:
+            error = self.query_errors.pop(0)
+            if error:
+                raise error
         return {"account_id": "synthetic-account", "rate_limit": {"allowed": self.allowed,
             "primary_window": {"limit_window_seconds": 18000, "used_percent": self.preflight_used,
                                "reset_at": (self.anchor if self.anchor is not None else self.now) + 18000}}}
@@ -272,3 +277,108 @@ class WatchTests(unittest.TestCase):
         for interval in (0, 1, True, float("nan"), 3601):
             with self.subTest(interval=interval), self.assertRaises(ScheduleError):
                 watch.run(self.directory, interval=interval)
+
+    def test_transient_reads_recover_using_only_the_successful_query_timing(self):
+        self.query_errors = [TransportError("PRIVATE_ERROR"), TransportError("busy", status=503)]
+
+        def emit(event):
+            self.events.append(event)
+            if event["event"] == "confirming_reset":
+                raise KeyboardInterrupt()
+
+        def sleep(delay):
+            self.now += delay
+
+        with patch.object(watch, "sleep_for", side_effect=sleep), self.assertRaises(KeyboardInterrupt):
+            watch.run(self.directory, send=False, emit=emit)
+        self.assertEqual(self.gets, 3)
+        self.assertEqual(self.saved()["window"]["candidate"]["query_started"], 120)
+        self.assertEqual([e["delay_seconds"] for e in self.events if e["event"] == "read_retry"], [5, 15])
+        self.assertNotIn("PRIVATE_ERROR", json.dumps(self.events))
+        self.assertEqual((self.sent, self.refreshes), (0, 0))
+
+    def test_read_retry_budget_is_bounded_and_rate_limits_wait_longer(self):
+        for status, delays in ((503, [5, 15, 45]), (429, [300, 300, 300])):
+            with self.subTest(status=status):
+                self.query_errors = [TransportError("unavailable", status=status)] * 4
+                before = self.gets
+                with patch.object(watch, "sleep_for") as sleep, self.assertRaises(TransportError):
+                    watch.run(self.directory)
+                self.assertEqual(self.gets - before, 4)
+                self.assertEqual([call.args[0] for call in sleep.call_args_list], delays)
+
+    def test_permanent_read_errors_never_retry(self):
+        for error in (TransportError("unauthorized", status=401),
+                      TransportError("invalid JSON", retryable=False)):
+            with self.subTest(error=error):
+                self.query_errors = [error]
+                with patch.object(watch, "sleep_for") as sleep, self.assertRaises(TransportError):
+                    watch.run(self.directory)
+                sleep.assert_not_called()
+
+    def test_enabled_watch_recovers_saved_credentials_without_refreshing_again(self):
+        with StateStore(self.directory) as store:
+            value = store.read("credentials.json")
+            value["phase"] = "verification_pending"
+            store.write("credentials.json", value)
+        self.query_errors = [TransportError("temporary verification error")]
+
+        def emit(event):
+            self.events.append(event)
+            if event["event"] == "confirming_reset":
+                raise KeyboardInterrupt()
+
+        with patch.object(watch, "sleep_for"), self.assertRaises(KeyboardInterrupt):
+            watch.run(self.directory, send=True, emit=emit)
+        self.assertEqual(self.credentials()["phase"], "ready")
+        self.assertEqual((self.gets, self.refreshes, self.sent), (3, 0, 0))
+        self.assertIn("credentials_verified", [e["event"] for e in self.events])
+
+    def test_readonly_watch_does_not_activate_pending_credentials(self):
+        with StateStore(self.directory) as store:
+            value = store.read("credentials.json")
+            value["phase"] = "verification_pending"
+            store.write("credentials.json", value)
+        with self.assertRaises(auth.AuthError):
+            watch.run(self.directory, send=False)
+        self.assertEqual((self.gets, self.refreshes, self.sent), (0, 0, 0))
+
+    def test_failed_get_after_refresh_retries_only_verification(self):
+        with StateStore(self.directory) as store:
+            value = store.read("credentials.json")
+            value["expires_at"] = 110
+            store.write("credentials.json", value)
+        self.query_errors = [TransportError("verification disconnected")]
+
+        def emit(event):
+            if event["event"] == "confirming_reset":
+                raise KeyboardInterrupt()
+
+        with patch.object(watch, "sleep_for"), self.assertRaises(KeyboardInterrupt):
+            watch.run(self.directory, send=True, emit=emit)
+        self.assertEqual(self.credentials()["phase"], "ready")
+        self.assertEqual((self.gets, self.refreshes, self.sent), (3, 1, 0))
+
+    def test_unknown_refresh_is_not_retried_in_continuous_watch(self):
+        with StateStore(self.directory) as store:
+            value = store.read("credentials.json")
+            value["expires_at"] = 110
+            store.write("credentials.json", value)
+        self.fail_refresh = True
+        with patch.object(watch, "sleep_for") as sleep, self.assertRaises(TransportError):
+            watch.run(self.directory, send=True)
+        sleep.assert_not_called()
+        self.assertEqual(self.refreshes, 1)
+        self.assertEqual(self.credentials()["phase"], "refresh_pending")
+
+    def test_failed_preflight_is_not_replayed_by_the_read_retry_loop(self):
+        self.run_once()
+        self.now = 102
+        self.query_errors = [None, TransportError("preflight disconnected")]
+        before = self.gets
+        with patch.object(watch, "sleep_for") as sleep, self.assertRaises(TransportError):
+            watch.run(self.directory, send=True)
+        sleep.assert_not_called()
+        self.assertEqual(self.gets - before, 2)
+        self.assertEqual(self.sent, 0)
+        self.assertIsNone(self.saved()["attempt"])

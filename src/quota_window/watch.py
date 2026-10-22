@@ -7,6 +7,56 @@ from .auth import AuthError, AuthSession
 from .inference import MODEL, RECIPE, InferenceError
 from .schedule import Schedule, ScheduleError
 from .storage import StateStore
+from .transport import TransportError
+
+
+READ_RETRY_DELAYS = (5, 15, 45)
+
+
+def _read(action, *, operation, once, emit, initial_error=None):
+    """Retry only an explicit GET; timing describes the successful attempt."""
+    error = initial_error
+    failures = 0
+    while True:
+        if error is None:
+            started = time.time()
+            try:
+                result = action()
+            except TransportError as caught:
+                error = caught
+            else:
+                return result, started, time.time()
+        if once or not error.retryable or failures == len(READ_RETRY_DELAYS):
+            raise error
+        delay = READ_RETRY_DELAYS[failures]
+        if error.status == 429:
+            delay = max(delay, 300)
+        failures += 1
+        emit({"event": "read_retry", "operation": operation, "retry": failures,
+              "delay_seconds": delay, "http_status": error.status})
+        sleep_for(delay)
+        error = None
+
+
+def _ready(session, *, send, once, emit):
+    local = session.local_status()
+    if local["state"] == "verification_pending" and send:
+        _read(session.verify, operation="credential_verification", once=once, emit=emit)
+        emit({"event": "credentials_verified"})
+        local = session.local_status()
+    if local["state"] != "ready":
+        raise AuthError("Authentication recovery is required before watching.")
+    if send and local["expires_at"] <= time.time() + 120:
+        try:
+            session.refresh()
+        except TransportError as error:
+            # A saved replacement token needs only GET verification. An unknown
+            # rotation remains refresh_pending and must never enter this retry.
+            if session.local_status()["state"] != "verification_pending":
+                raise
+            _read(session.verify, operation="credential_verification", once=once,
+                  emit=emit, initial_error=error)
+        emit({"event": "credentials_refreshed"})
 
 
 def sleep_for(seconds):
@@ -30,15 +80,9 @@ def run(directory, *, send=False, once=False, interval=300, emit=None):
     with StateStore(session.directory / "watch") as store:
         engine = Schedule(store.read("schedule.json"), binding)
         while True:
-            local = session.local_status()
-            if local["state"] != "ready":
-                raise AuthError("Authentication recovery is required before watching.")
-            elif send and local["expires_at"] <= time.time() + 120:
-                session.refresh()
-                emit({"event": "credentials_refreshed"})
-            started = time.time()
-            snapshot = session.query_quota()
-            now = time.time()
+            _ready(session, send=send, once=once, emit=emit)
+            snapshot, started, now = _read(session.query_quota, operation="quota",
+                                          once=once, emit=emit)
             try:
                 decision = engine.observe(snapshot, started, now)
             except ScheduleError:

@@ -67,6 +67,7 @@ class TransportTests(unittest.TestCase):
                 with self.assertRaises(transport.TransportError) as caught:
                     transport.request_json("https://auth.openai.com/.well-known/openid-configuration")
                 self.assertNotIn("SYNTHETIC_SECRET", str(caught.exception))
+                self.assertFalse(caught.exception.retryable)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- 持续 watch 对临时额度 GET 错误有界重试，并自动完成已保存凭据的 GET 验证；协议错误停止。
+
 ## 0.1.0 — 2026-10-22
 
 首个实验性版本，名称为 codex-nudge。
