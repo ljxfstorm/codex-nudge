@@ -249,5 +249,15 @@ class PersistentSchedule:
     def delay(self, now, interval=300):
         return self._schedule.delay(now, interval)
 
+    def can_reset(self):
+        attempt = self._schedule.data["attempt"]
+        return attempt is None or attempt["phase"] == "verified"
+
+    def after_reset(self):
+        if not self.can_reset():
+            raise ScheduleError("Finish inference verification before applying an external reset.")
+        self._schedule.data["window"] = None
+        self._save()
+
     def _save(self):
         self._store.write("schedule.json", self._schedule.data)

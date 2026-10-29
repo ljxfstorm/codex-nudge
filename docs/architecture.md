@@ -45,6 +45,16 @@
 
 响应状态/类型及流内容校验失败时，`InferenceError` 附带 HTTP 状态码和白名单媒体类型；参数及未知媒体类型内容不回显。`PersistentSchedule` 在已有 `sending` 意图时将这些安全字段保存为 `blocked` 的 failure，不保存任意错误正文或回复。缺失 usage 不等于零消耗；该记录只能说明接收失败，不能判断服务端是否已经完成推理。backend Lite 可能返回没有 Content-Type 头的有效 SSE，因此 HTTP 200 时允许该头缺失；显式提供的媒体类型仍必须为 text/event-stream。所有响应均须通过完整 SSE 终态、完成状态、模型、输出项和 usage 校验，JSON、HTML、仅有增量或 DONE 的流不算成功。产品不保存响应正文。
 
+## 到期兑换与恢复
+
+`resets.py` 只保留机会 ID、状态、精确到期时间及套餐支持，忽略推荐人、头像与文案。基于官方 Codex rust-v0.164.0 的固定实现（`6aaac694803004a63c6f393d153c96d22521a6b9`），通过 WHAM `rate-limit-reset-credits` GET 查询，POST 到其 `/consume` 路径，提交 `credit_id` 与 `redeem_request_id`。该请求不执行模型推理。只有发送模式且显式配置提前量时才消费，额度尚未耗尽不会在客户端阻止兑换；服务端决定适用窗口。
+
+`ExpiringResets` 复用 watcher 的生命周期租约，将账户绑定与单个兑换尝试保存在私有 `watch/resets.json`。最终额度 GET、机会 GET、意图保存和 POST 在 `AuthSession` 凭据锁内完成；意图未保存就不 POST。`sending` 表示结果尚未保存，`received` 表示收到明确成功但尚未确认，`verified` 表示同一机会已标为 redeemed 且后置额度查询账户匹配，`skipped` 表示服务端明确返回 nothing_to_reset 或 no_credit。无效果结果冷却 300 秒后可基于新查询创建新尝试。
+
+恢复先查原机会；已兑换则只做后置查询，仍可用时仅用原幂等键和原 ID 重试，最多四次 POST；服务端 Retry-After 进入持久 retry_at。过期后不再 POST，但仍可查询确认已有兑换。未知响应保留 sending 并停止；确认超过十分钟也停止。计数变化不能代替同一机会的状态确认，缺失的机会详情不能当作已兑换。
+
+推理正在复核时暂缓兑换。兑换待确认期间阻止推理，确认后由 `PersistentSchedule.after_reset` 清除旧窗口观测并保存，保留已验证的推理记录；下一轮重新分类真实额度。兑换本身的确认不要求观测到 100%，因为其他客户端可以同时使用额度。兑换凭据/机会标识与原始响应不进入日志和诊断。
+
 ## 配置与服务
 
 `config.py` 读写显式指定的私有 JSON 文件。配置创建先写入随机 0600 临时文件并 fsync，再以硬链接原子发布，不覆盖任何已有文件或符号链接；发布后的目录同步失败也保留完整结果。读取拒绝非普通文件、其他用户所有的文件、公开权限、重复键、未知字段和版本。相对状态路径以配置文件目录为基准，不依赖启动 cwd，不插入 shell 或环境变量。配置不保存 token。

@@ -13,12 +13,14 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 from .identity import ISSUER, verify_identity
 from .quota import parse_snapshot
+from .resets import parse_credits, parse_outcome
 from .storage import StateStore
 from .transport import request_json
 
 
 TOKEN_URL = ISSUER + "/oauth/token"
 USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
 CALLBACK = "http://127.0.0.1:1455/auth/callback"
 PHASES = {"ready", "verification_pending", "refresh_pending"}
 
@@ -229,6 +231,30 @@ class AuthSession:
             if value["phase"] != "ready":
                 raise AuthError("Credential recovery is pending; query will not clear it or refresh tokens.")
             return self._snapshot(value)
+
+    def _reset_credits(self, value):
+        if value["phase"] != "ready" or value["expires_at"] <= time.time() + 15:
+            raise AccessTokenExpired("Reset queries require ready, unexpired credentials; no refresh sent.")
+        return parse_credits(self.request(RESET_CREDITS_URL, access_token=value["access_token"],
+                                         account_id=value["account_id"]))
+
+    def query_reset_credits(self):
+        with StateStore(self.directory) as store:
+            return self._reset_credits(self._credentials(store))
+
+    def redeem_reset_credit(self, reserve):
+        """One explicit redemption after a locked quota/credit preflight and saved intent."""
+        with StateStore(self.directory) as store:
+            value = self._credentials(store)
+            if value["phase"] != "ready" or value["expires_at"] <= time.time() + 90:
+                raise AuthError("Reset redemption requires ready credentials with 90 seconds remaining.")
+            snapshot = self._snapshot(value)
+            _, credits = self._reset_credits(value)
+            body = reserve(credits, snapshot, time.time())
+            if body is None:
+                return None
+            return parse_outcome(self.request(RESET_CREDITS_URL + "/consume", body=body,
+                access_token=value["access_token"], account_id=value["account_id"]))
 
     def refresh(self):
         with StateStore(self.directory) as store:

@@ -14,6 +14,8 @@ Codex Nudge 是独立社区工具。它使用实验性的 Codex 兼容认证、�
 
 已实测独立登录、一次凭据轮换及连续两个自然窗口；推理单次为 18–19 tokens。更长运行与故障反馈进入正常维护，不作为等待无限期的发布门槛。实测不构成所有套餐、weekly 或永久消耗上限的保证。
 
+到期重置机会兑换为单独显式开启的能力，基于[官方客户端固定实现](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/backend-client/src/client/rate_limit_resets.rs)和[已发布的兑换语义](https://learn.chatgpt.com/docs/app-server#8-earned-rate-limit-resets-chatgpt)。重置范围和未耗尽时的资格由服务端决定，客户端不预设 5h 或 weekly 必定恢复。此功能不提高套餐额度上限，不购买额外权益。查询详情已用当前账户验证；自动兑换首次实际结果应通过同一机会状态和后置额度确认。
+
 ## 条款与代码许可
 
 使用仍受账号适用的[个人服务条款](https://openai.com/policies/row-terms-of-use/)或相应地区/订阅协议约束；条款包含自动化、访问限制与保护措施的约束。所核对公开资料没有专门说明本工具的到期唤醒组合用途，不能据此保证符合条款，也不能把技术成功视为许可。

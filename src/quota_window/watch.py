@@ -11,6 +11,7 @@ from .auth import AccessTokenExpired, AuthError, AuthSession
 from .identity import IdentityError
 from .inference import MODEL, RECIPE, InferenceError
 from .quota import QuotaError
+from .resets import ExpiringResets, ResetError, validate_lead
 from .schedule import PersistentSchedule, ScheduleError
 from .storage import StateStore, StorageError
 from .transport import TransportError
@@ -52,6 +53,7 @@ def _failure(error):
     for cls, kind in ((AuthError, "authentication"), (IdentityError, "identity"),
                       (QuotaError, "quota"), (ScheduleError, "schedule"),
                       (InferenceError, "inference"), (StorageError, "storage"),
+                      (ResetError, "reset"),
                       (KeyboardInterrupt, "interrupted")):
         if isinstance(error, cls):
             return {"kind": kind}
@@ -169,7 +171,8 @@ def sleep_for(seconds):
         time.sleep(min(60, remaining))
 
 
-def run(directory, *, send=False, once=False, interval=300, emit=None):
+def run(directory, *, send=False, once=False, interval=300, reset_before_expiry_seconds=None, emit=None):
+    validate_lead(reset_before_expiry_seconds)
     if (not isinstance(interval, (int, float)) or isinstance(interval, bool)
             or not math.isfinite(interval) or not 2 <= interval <= 3600):
         raise ScheduleError("Watch interval must be between 2 and 3600 seconds.")
@@ -183,8 +186,10 @@ def run(directory, *, send=False, once=False, interval=300, emit=None):
         with _termination():
             try:
                 engine = PersistentSchedule(store, binding)
-                emit({"event": "watcher_started", "version": __version__, "automatic_requests_enabled": send})
-                _loop(session, engine, health, send=send, once=once, interval=interval, emit=emit)
+                resets = ExpiringResets(store, binding, reset_before_expiry_seconds)
+                emit({"event": "watcher_started", "version": __version__, "automatic_requests_enabled": send,
+                      "reset_before_expiry_seconds": reset_before_expiry_seconds if send else None})
+                _loop(session, engine, resets, health, send=send, once=once, interval=interval, emit=emit)
             except BaseException as error:
                 try:
                     health.stop(error)
@@ -196,7 +201,7 @@ def run(directory, *, send=False, once=False, interval=300, emit=None):
             health.stop()
 
 
-def _loop(session, engine, health, *, send, once, interval, emit):
+def _loop(session, engine, resets, health, *, send, once, interval, emit):
     while True:
         _ready(session, send=send, once=once, emit=emit, health=health)
         try:
@@ -212,7 +217,8 @@ def _loop(session, engine, health, *, send, once, interval, emit):
         window = snapshot.five_hour_window()
         emit({"event": decision, "at": now, "automatic_requests_enabled": send,
               "reset_at": window.resets_at, "remaining_percent": window.remaining_percent})
-        if decision == "idle_window" and send and snapshot.ordinary_usage_allowed is True:
+        reset_wait = resets.tick(session, engine, send=send, emit=emit)
+        if not reset_wait and decision == "idle_window" and send and snapshot.ordinary_usage_allowed is True:
             health.update(phase="requesting", next_action="wake_request", next_action_at=None)
             completed = engine.wake_once(session)
             if completed is not None:
@@ -226,8 +232,14 @@ def _loop(session, engine, health, *, send, once, interval, emit):
         delay = engine.delay(time.time(), interval)
         if decision == "idle_window" and (not send or snapshot.ordinary_usage_allowed is not True):
             delay = interval
+        if reset_wait:
+            delay = min(interval, max(0.1, (resets.next_at or time.time() + 2) - time.time()))
+        elif resets.next_at is not None:
+            delay = min(delay, max(0.1, resets.next_at - time.time()))
         local = session.local_status()
         if send and local["state"] == "ready":
             delay = min(delay, max(0.1, local["expires_at"] - time.time() - 120))
-        health.update(phase="waiting", next_action="observation", next_action_at=time.time() + delay)
+        health.update(phase="waiting", next_action="observation", next_action_at=time.time() + delay,
+                      automatic_resets_enabled=send and resets.lead is not None,
+                      reset_redeem_at=resets.next_at)
         sleep_for(delay)

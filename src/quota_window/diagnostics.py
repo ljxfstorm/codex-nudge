@@ -18,7 +18,7 @@ WINDOW_PHASES = {"discovering", "armed", "await_refresh", "ready"}
 ATTEMPT_PHASES = {"sending", "completed", "verified", "blocked"}
 RUNTIME_PHASES = {"starting", "querying", "observing", "renewing", "retrying", "waiting", "requesting", "stopped"}
 ERROR_KINDS = {"http", "network", "protocol", "authentication", "identity", "quota", "schedule",
-               "inference", "storage", "interrupted", "unexpected"}
+               "inference", "storage", "interrupted", "unexpected", "reset"}
 
 
 def _number(value):
@@ -52,10 +52,12 @@ def _runtime(directory):
     result["phase"] = _phase(value.get("phase"), RUNTIME_PHASES)
     if type(value.get("automatic_requests_enabled")) is bool:
         result["automatic_requests_enabled"] = value["automatic_requests_enabled"]
+    if type(value.get("automatic_resets_enabled")) is bool:
+        result["automatic_resets_enabled"] = value["automatic_resets_enabled"]
     version = value.get("version")
     if isinstance(version, str) and re.fullmatch(r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}(?:[-+][A-Za-z0-9.-]{1,40})?", version):
         result["version"] = version
-    for key in ("started_at", "updated_at", "stopped_at", "last_successful_query_at", "next_action_at", "last_error_at"):
+    for key in ("started_at", "updated_at", "stopped_at", "last_successful_query_at", "next_action_at", "last_error_at", "reset_redeem_at"):
         if _number(value.get(key)) and value[key] >= 0:
             result[key] = value[key]
     action = value.get("next_action")
@@ -97,7 +99,23 @@ def collect(directory, *, settings=None):
                           "machine": platform.machine(), "dependencies": dependencies},
               "configuration": {"provided": settings is not None,
                                 "watch_send": settings.send if settings else False,
-                                "interval_seconds": settings.interval if settings else 300}}
+                                "interval_seconds": settings.interval if settings else 300,
+                                "reset_before_expiry_seconds": settings.reset_before_expiry_seconds if settings else None}}
+    status, reset = _record(directory / "watch", "resets.json")
+    redemption = report["reset_redemption"] = {"record": status}
+    if reset and isinstance(reset.get("attempt"), dict):
+        attempt = reset["attempt"]
+        redemption["phase"] = _phase(attempt.get("phase"), {"sending", "received", "verified", "skipped"})
+        for key in ("expires_at", "started_at", "retry_at", "verified_at"):
+            if _number(attempt.get(key)) and attempt[key] >= 0:
+                redemption[key] = attempt[key]
+        if type(attempt.get("post_attempts")) is int and 1 <= attempt["post_attempts"] <= 4:
+            redemption["post_attempts"] = attempt["post_attempts"]
+        outcome = attempt.get("result")
+        if isinstance(outcome, dict):
+            redemption["code"] = _phase(outcome.get("code"), {"reset", "already_redeemed", "nothing_to_reset", "no_credit"})
+            if type(outcome.get("windows_reset")) is int and outcome["windows_reset"] >= 0:
+                redemption["windows_reset"] = outcome["windows_reset"]
     status, credentials = _record(directory, "credentials.json")
     authentication = report["authentication"] = {"record": status}
     if credentials:

@@ -14,6 +14,7 @@ from .config import ConfigError, absolute_path, create as create_config, load as
 from .diagnostics import collect as collect_diagnostics
 from .identity import IdentityError
 from .quota import QuotaError
+from .resets import ResetError
 from .inference import InferenceError
 from .schedule import ScheduleError
 from .service import ServiceError, render as render_service
@@ -39,6 +40,7 @@ def _parser():
     setup.add_argument("--client-id", help="optional compatibility OAuth client ID")
     setup.add_argument("--enable-send", action="store_true", help="explicitly enable automatic requests in this configuration")
     setup.add_argument("--interval", type=float, default=300, help="normal polling seconds (2..3600)")
+    setup.add_argument("--reset-before-expiry", type=float, help="opt in to redeeming expiring reset credits this many seconds before expiry (60..86400); watch also requires --send")
     login = commands.add_parser("login", help="independent browser login or explicit credential recovery")
     login.add_argument("--client-id", help="explicit compatibility OAuth client ID; required for a new login")
     actions = login.add_mutually_exclusive_group()
@@ -48,6 +50,7 @@ def _parser():
     actions.add_argument("--refresh", action="store_true", help="explicitly renew credentials once, then verify the account")
     status = commands.add_parser("status", help="query quota without inference or token refresh")
     status.add_argument("--offline", action="store_true", help="inspect local state without network access")
+    status.add_argument("--resets", action="store_true", help="also GET reset credit details and preview expiry times; never redeem")
     doctor = commands.add_parser("doctor", help="diagnose local readiness; offline by default")
     doctor.add_argument("--online", action="store_true", help="also verify quota with a GET; never refresh")
     commands.add_parser("diagnostics", help="print an offline, redacted JSON report; no credentials or raw logs")
@@ -55,6 +58,7 @@ def _parser():
     _send_options(watch)
     watch.add_argument("--once", action="store_true", help="take one observation and send at most once; verification may need later runs")
     watch.add_argument("--interval", type=float, help="normal polling seconds (2..3600); defaults to configuration or 300")
+    watch.add_argument("--reset-before-expiry", type=float, help="explicitly enable expiring reset redemption (60..86400 seconds); requires send mode")
     service = commands.add_parser("service", help="print a systemd user unit; does not install or start it")
     _send_options(service)
     return parser
@@ -74,7 +78,8 @@ def main(argv=None):
             if not args.config or not args.state_dir:
                 parser.error("setup requires --config and --state-dir")
             settings = create_config(args.config, state_dir=args.state_dir, client_id=args.client_id,
-                                     send=args.enable_send, interval=args.interval)
+                                     send=args.enable_send, interval=args.interval,
+                                     reset_before_expiry_seconds=args.reset_before_expiry)
             print(json.dumps({"config_saved": True, "watch_send": settings.send}))
             return 0
         settings = load_config(args.config) if args.config else None
@@ -98,10 +103,13 @@ def main(argv=None):
                 if not args.client_id:
                     parser.error("a new login requires --client-id in arguments or configuration")
         session = AuthSession(state_dir)
+        if args.command == "status" and args.offline and args.resets:
+            parser.error("status --resets requires an online query; omit --offline")
         if args.command == "watch":
             send = args.send if args.send is not None else settings.send if settings else False
             interval = args.interval if args.interval is not None else settings.interval if settings else 300
-            run_watch(state_dir, send=send, once=args.once, interval=interval,
+            reset_lead = args.reset_before_expiry if args.reset_before_expiry is not None else settings.reset_before_expiry_seconds if settings else None
+            run_watch(state_dir, send=send, once=args.once, interval=interval, reset_before_expiry_seconds=reset_lead,
                       emit=lambda event: print(json.dumps(event, allow_nan=False), flush=True))
             return 0
         if args.command == "login":
@@ -138,6 +146,11 @@ def main(argv=None):
                               ready_for_query=local["state"] == "ready" and not local.get("expired", True))
             if online and local["state"] != "not_logged_in":
                 result["quota"] = _quota(session.query_quota())
+                if args.command == "status" and args.resets:
+                    count, credits = session.query_reset_credits()
+                    lead = settings.reset_before_expiry_seconds if settings else None
+                    result["reset_credits"] = {"available_count": count,
+                        "configured_lead_seconds": lead, "credits": [c.preview(lead) for c in credits]}
             if online and local["state"] == "not_logged_in":
                 result["query"] = "not_logged_in"
         print(json.dumps(result, allow_nan=False, indent=2))
@@ -147,7 +160,7 @@ def main(argv=None):
     except TransportError as error:
         print(str(error), file=sys.stderr)
         return 2 if args.command == "watch" and not error.retryable else 1
-    except (AuthError, IdentityError, QuotaError, StorageError, InferenceError, ScheduleError, ConfigError, ServiceError) as error:
+    except (AuthError, IdentityError, QuotaError, StorageError, InferenceError, ScheduleError, ConfigError, ServiceError, ResetError) as error:
         print(str(error), file=sys.stderr)
         return 2 if args.command == "watch" else 1
     except EOFError:

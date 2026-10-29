@@ -10,6 +10,7 @@ import secrets
 import stat
 
 from .storage import _constant, _object
+from .resets import ResetError, validate_lead
 
 
 MAX_BYTES = 65536
@@ -25,6 +26,7 @@ class Settings:
     client_id: str | None = None
     send: bool = False
     interval: float = 300
+    reset_before_expiry_seconds: float | None = None
 
 
 def absolute_path(value, base=None):
@@ -41,7 +43,7 @@ def absolute_path(value, base=None):
 
 
 def _settings(value, base):
-    if (not isinstance(value, dict) or set(value) - {"schema", "state_dir", "client_id", "send", "interval"}
+    if (not isinstance(value, dict) or set(value) - {"schema", "state_dir", "client_id", "send", "interval", "reset_before_expiry_seconds"}
             or type(value.get("schema")) is not int or value["schema"] != 1):
         raise ConfigError("Configuration has an unsupported schema or unknown fields.")
     directory = value.get("state_dir")
@@ -60,7 +62,11 @@ def _settings(value, base):
         valid_interval = False
     if not valid_interval:
         raise ConfigError("Configuration interval must be between 2 and 3600 seconds.")
-    return Settings(absolute_path(directory, base), client, send, interval)
+    try:
+        reset_lead = validate_lead(value.get("reset_before_expiry_seconds"))
+    except ResetError as error:
+        raise ConfigError(str(error)) from None
+    return Settings(absolute_path(directory, base), client, send, interval, reset_lead)
 
 
 def load(path):
@@ -81,12 +87,14 @@ def load(path):
     return _settings(value, path.parent)
 
 
-def create(path, *, state_dir, client_id=None, send=False, interval=300):
+def create(path, *, state_dir, client_id=None, send=False, interval=300, reset_before_expiry_seconds=None):
     path = absolute_path(path)
     settings = _settings({"schema": 1, "state_dir": str(absolute_path(state_dir)),
-                          "client_id": client_id, "send": send, "interval": interval}, path.parent)
+                          "client_id": client_id, "send": send, "interval": interval,
+                          "reset_before_expiry_seconds": reset_before_expiry_seconds}, path.parent)
     data = json.dumps({"schema": 1, "state_dir": str(settings.state_dir), "client_id": settings.client_id,
-                       "send": settings.send, "interval": settings.interval}, indent=2).encode() + b"\n"
+                       "send": settings.send, "interval": settings.interval,
+                       "reset_before_expiry_seconds": settings.reset_before_expiry_seconds}, indent=2).encode() + b"\n"
     if len(data) > MAX_BYTES:
         raise ConfigError("Configuration exceeds its size limit.")
     directory = None

@@ -2,7 +2,7 @@
 
 面向单账号 Linux 服务器的小工具：观测 Codex 额度窗口，并在显式开启后，以低消耗请求启动新的 5h 窗口。无需安装 Codex，也无需服务器上有浏览器。
 
-默认只读。额度显示 100% 不会单独触发请求；工具先区分浮动 reset 和已启动窗口，再在发送前复查。结果不明时停止，重启不会补发。首版仅自动处理普通 5h 窗口，不处理 weekly、额外 bucket 或未经验证的套餐机制。
+默认只读。额度显示 100% 不会单独触发请求；工具先区分浮动 reset 和已启动窗口，再在发送前复查。推理结果不明时停止，重启不会补发。自动唤醒仅处理普通 5h 窗口；可另行显式开启到期重置机会兑换，其影响的额度窗口由服务端决定。
 
 这是独立社区项目，采用实验性的 Codex 兼容认证和后端协议，不会增加订阅额度。接口支持及适用条款见[兼容性说明](docs/compatibility.md)。许可证为 [MIT](LICENSE)。
 
@@ -48,6 +48,21 @@ uv run --locked codex-nudge --config ~/.config/codex-nudge/settings.json watch -
 
 请求采用固定的 `gpt-6-luna` / `low` / `Say OK.` 配方，无历史或工具定义，不回退模型。已实测独立登录、续期和连续两个自然 5h 窗口，单次消耗为 18–19 tokens；这是观测值，不是上限。usage 来自服务端完成事件，缺失时保持未知。
 
+## 到期重置机会
+
+`status --resets` 额外查询重置机会并显示脱敏标识、套餐支持、到期时间和已配置的兑换时间；时间字段为 Unix 秒。该命令不会消费机会。
+
+```sh
+uv run --locked codex-nudge --config ~/.config/codex-nudge/settings.json status --resets
+uv run --locked codex-nudge --config ~/.config/codex-nudge/settings.json watch --send --reset-before-expiry 900
+```
+
+默认关闭到期兑换。上述 watch 命令显式开启到期前 900 秒兑换；持久启用时，在配置 JSON 中加入 `"reset_before_expiry_seconds": 900`，并以发送模式运行。新配置也可通过 `setup --reset-before-expiry 900` 准备；`--no-send` 始终禁止兑换。提前量允许 60..86400 秒，值为 `null` 时关闭。
+
+仅选择明确到期、状态可用且套餐支持的最早到期机会，发送前在凭据锁内重新查询额度和同一机会，指定其 ID 兑换；不要求当前额度耗尽。机会字段缺失、不支持、过期或不明确时跳过，服务端的 `nothing_to_reset` 不算兑换成功。每轮普通查询最多增加一次机会查询，兑换前和恢复阶段会额外查询。
+
+兑换意图、机会 ID 和幂等键先保存，再执行独立兑换 POST，无模型推理。收到成功结果后仅查询确认；响应丢失时先查同一机会，仍可用且未到期时，最多四次 POST 使用原机会和原幂等键，遵守服务端等待要求。不会为恢复更换机会或键；未知协议、过期后结果仍不明或重试耗尽时停止。正式确认前暂停自动推理。额度自然刷新与兑换不同，恢复额度及 reset 时间以兑换后的查询为准。
+
 ## 后台运行
 
 在不会被清理或移动的目录部署。`service` 仅生成文件，不安装或启动服务：
@@ -77,7 +92,7 @@ umask 077
 uv run --locked codex-nudge --config ~/.config/codex-nudge/settings.json diagnostics > diagnostics.json
 ```
 
-报告包含环境、配置开关、认证阶段、窗口和最近一次 usage；不包含凭据、账户标识、路径、attempt ID、原始回复或日志。`watcher.runtime` 提供后台记录的版本、实际发送开关、最后成功查询、下次动作、读重试次数及安全错误分类；其中 `automatic_requests_enabled` 能反映进程的 `--send` 覆盖。配置部分仍只表示配置文件。
+报告包含环境、配置开关、认证阶段、窗口和最近一次 usage；不包含凭据、账户标识、路径、attempt ID、原始回复或日志。`watcher.runtime` 提供后台记录的版本、实际发送开关、最后成功查询、下次动作、读重试次数及安全错误分类；其中 `automatic_requests_enabled` 能反映进程的 `--send` 覆盖。`automatic_resets_enabled` 与 `reset_redeem_at` 表示实际到期兑换开关和下次目标时间，`reset_redemption` 提供独立兑换的阶段与结果。配置部分仍只表示配置文件。
 
 runtime 是最后一次本地快照，不证明进程仍活着；超过预定动作时间 60 秒未更新时 `overdue=true`，没有预定时间则从最后更新时间起算。退出时记录 `stopped_at` 与原因；watch 收到 SIGTERM（如 systemd 停止服务）会尽力写入 `stop_reason=terminated`、释放锁并正常退出，请求或续期的不确定标记仍保留。启动早期、落盘失败、强制结束或主机掉电可能只留下旧快照，服务存活状态以 `systemctl --user status codex-nudge.service` 为准。日志保存在前台标准输出或用户 journal，由主机的 journal 保留策略管理。
 
