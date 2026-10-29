@@ -153,6 +153,10 @@ class ExpiringResets:
                     self._save()
                 return self._verify(session, schedule, emit)
             if self.attempt["phase"] == "received":
+                # A saved success is authoritative even when the history list
+                # omits a redeemed row. Missing rows alone never resolve sending.
+                if credit is None:
+                    return self._verify(session, schedule, emit)
                 if now > self.attempt["started_at"] + 600:
                     raise ResetError("Reset confirmation timed out; no new redemption will be sent.")
                 self.attempt["retry_at"] = now + 5

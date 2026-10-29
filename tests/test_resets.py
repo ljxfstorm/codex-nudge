@@ -159,6 +159,15 @@ class ResetTests(unittest.TestCase):
         self.assertTrue(self.tick())
         self.assertEqual(len(self.posts), 1)
 
+    def test_saved_success_can_be_verified_when_redeemed_history_is_omitted(self):
+        self.tick()
+        self.cards = self.cards[1:]
+        self.restored()
+        self.now += 5
+        self.assertTrue(self.tick())
+        self.assertEqual(self.manager.attempt["phase"], "verified")
+        self.assertEqual(len(self.posts), 1)
+
     def test_result_write_failure_recovers_from_saved_intent_without_another_post(self):
         original = self.store.write
 
